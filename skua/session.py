@@ -1,5 +1,7 @@
-"""API-independent conversation records held only in memory; no persistence."""
-from dataclasses import dataclass
+"""API-independent conversation state; persistence is owned by storage.py."""
+from dataclasses import asdict, dataclass
+import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -24,6 +26,41 @@ class Session:
         self.initial_model = identity
         self.events: list[dict] = []
         self.active_turn: int | None = None
+        self.name: str | None = None
+        self.destination: Path | None = None
+        self.saved_bytes: bytes | None = None
+        self.lock = None
+        self.exports: dict[str, bytes] = {}
+        self._saved_state = self._state()
+
+    def _state(self):
+        return hashlib.sha256(json.dumps([self.name, self.events], sort_keys=True).encode()).digest()
+
+    @property
+    def dirty(self) -> bool:
+        return self._saved_state != self._state()
+
+    def mark_saved(self):
+        self._saved_state = self._state()
+
+    @property
+    def current_model(self) -> ModelIdentity:
+        for event in reversed(self.events):
+            if event['type'] == 'model_changed':
+                return ModelIdentity(**event['current'])
+        return self.initial_model
+
+    def change_model(self, identity: ModelIdentity):
+        if self.active_turn is not None:
+            raise ValueError('cannot change model during a turn')
+        if identity != self.current_model:
+            self._append('model_changed', previous=asdict(self.current_model),
+                         current=asdict(identity), reason='resume', confirmed=True)
+
+    def close(self):
+        if self.lock is not None:
+            self.lock.close()
+            self.lock = None
 
     def _append(self, kind: str, **fields) -> int:
         seq = len(self.events) + 1
@@ -57,5 +94,16 @@ class Session:
                 text = event['text']
                 if event['completion'] == 'interrupted':
                     text += '\n[This response was interrupted and is incomplete.]'
-                result.append({'role': event['role'], 'content': text})
+                message = {'role': event['role'], 'content': text}
+                if event['call_seqs']:
+                    calls = [self.events[seq - 1] for seq in event['call_seqs']]
+                    message['tool_calls'] = [
+                        {'id': f"skua_call_{call['seq']}", 'type': 'function',
+                         'function': {'name': call['name'], 'arguments': json.dumps(call['arguments'])}}
+                        for call in calls
+                    ]
+                result.append(message)
+            elif event['type'] == 'tool_result':
+                result.append({'role': 'tool', 'tool_call_id': f"skua_call_{event['call_seq']}",
+                               'content': event['model_text']})
         return result

@@ -57,3 +57,18 @@ def test_local_diagnostics_no_profile_or_network(workspace, capsys, monkeypatch)
     assert not (workspace / '.skua').exists()
     assert main(['squak']) == 2
     assert 'skua init' in capsys.readouterr().err
+
+
+def test_sessions_is_offline_and_creates_nothing(workspace, monkeypatch, capsys):
+    monkeypatch.setattr('socket.socket.connect', lambda *args: (_ for _ in ()).throw(AssertionError('network')))
+    assert main(['sessions']) == 0
+    assert 'No saved sessions' in capsys.readouterr().out
+    assert not (workspace/'.skua').exists()
+
+
+def test_resume_option_routes_to_chat(workspace, global_file, monkeypatch):
+    put(global_file, BASE)
+    seen = []
+    monkeypatch.setattr('skua.cli.run_chat', lambda config, **kw: seen.append(kw) or 0)
+    assert main(['--resume','saved.jsonl']) == 0
+    assert seen == [{'resume':'saved.jsonl'}]

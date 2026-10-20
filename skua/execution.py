@@ -103,13 +103,13 @@ async def _finish_despite_cancellation(task):
 
 
 async def run_command(config: Config, command: str, *, environ: Mapping[str, str] | None = None,
-                      _grace_seconds: float = 5.0) -> CommandResult:
+                      _grace_seconds: float = 5.0, _invocation=None) -> CommandResult:
     """Run an already-authorized command; cancellation returns captured output after cleanup.
 
     Retention and preview budgets are split equally across stdout/stderr (odd byte
     goes to stdout). No spill files, transcript writes, rollback, or Git operations.
     """
-    invocation = prepare_command(config, command, environ)
+    invocation = _invocation or prepare_command(config, command, environ)
     started = time.monotonic()
     spawn = asyncio.create_task(asyncio.create_subprocess_exec(
         *invocation.argv, cwd=invocation.root, env=invocation.env,

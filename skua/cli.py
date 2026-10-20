@@ -11,7 +11,8 @@ from .config import ConfigError, load_config, resolve_credential, resolve_root
 from .setup import run_setup
 from .squak import check_local, check_full
 from .client import ModelError
-from .terminal import run_chat
+from .terminal import run_chat, safe_text
+from .storage import Store, StorageError
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
@@ -24,7 +25,10 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="skua", description="A lightweight terminal coding harness (interactive conversation and diagnostics).")
     result.add_argument("--version", action="version", version=f"skua {__version__}")
     _common(result)
+    result.add_argument("--resume", metavar="ID_OR_PATH", help="resume a saved session in this project")
     commands = result.add_subparsers(dest="command")
+    sessions = commands.add_parser("sessions", help="list saved sessions offline")
+    _common(sessions)
     init = commands.add_parser("init", help="configure global defaults or project overrides; no network requests")
     _common(init)
     init.add_argument("--project", action="store_true", help="write <root>/.skua/config.toml")
@@ -50,10 +54,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = resolve_root(getattr(args, "root", None))
         selected = getattr(args, "profile", None)
+        if args.resume is not None and args.command is not None:
+            raise ConfigError("--resume launches chat and cannot be combined with a subcommand")
         if args.command == "init":
             run_setup(root, project=args.project, profile=selected)
             return 0
         config = load_config(root, profile=selected)
+        if args.command == "sessions":
+            print(safe_text("\n".join(Store(root, config.sessions_directory).list_sessions()) or "No saved sessions."))
+            return 0
         if args.command == "squak":
             return check_local(config) if args.local else check_full(config)
         if args.command == "profiles":
@@ -81,8 +90,8 @@ def main(argv: list[str] | None = None) -> int:
                     resolve_credential(config)
                 print("Configuration is valid." + (" Selected-profile credentials are ready (or authentication is disabled)." if args.credentials else ""))
             return 0
-        return run_chat(config)
-    except (ConfigError, ModelError) as exc:
+        return run_chat(config, resume=args.resume) if args.resume is not None else run_chat(config)
+    except (ConfigError, ModelError, StorageError) as exc:
         print(f"skua: {exc}", file=sys.stderr)
         return 2
     except (KeyboardInterrupt, EOFError):
