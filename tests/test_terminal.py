@@ -20,6 +20,10 @@ def test_bracketed_paste_and_alt_enter_require_submission():
             await asyncio.sleep(0.03)
             assert not task.done()
             assert terminal.prompt.default_buffer.text == 'line one\nline two'
+            assert terminal.prompt.message == '❯ '
+            assert terminal.prompt.layout.current_window.style() == 'class:input-field'
+            height = terminal.prompt.layout.current_window.preferred_height(80, 40)
+            assert height.min == height.max == 1
             pipe.send_text('\x1b\rthird')
             await asyncio.sleep(0.03)
             assert not task.done()
@@ -98,6 +102,86 @@ def test_output_is_plain_text_without_terminal_controls():
     assert '[bold]literal' in target.getvalue()
 
 
+def test_markdown_reply_flushes_before_notice_without_changing_literal_output():
+    target = StringIO()
+    terminal = Terminal(console=Console(file=target, force_terminal=False, width=80), output=DummyOutput())
+    terminal.stream_reply('**Strong')
+    terminal.stream_reply(' text**\n\n- List item\n\n```python\nprint("hello")\n```\x07')
+    terminal.write('Notice: [bold]literal')
+    terminal.finish_reply()
+    rendered = target.getvalue()
+    assert rendered.count('Strong text') == 1
+    assert '**' not in rendered and '```' not in rendered and '\x07' not in rendered
+    assert 'List item' in rendered and 'print("hello")' in rendered
+    assert rendered.index('Strong text') < rendered.index('Notice: [bold]literal')
+
+
+def test_streaming_markdown_cleanup_keeps_complete_long_reply():
+    target = StringIO()
+    terminal = Terminal(console=Console(file=target, force_terminal=True, width=40, height=4), output=DummyOutput())
+    terminal.stream_reply('\n\n'.join(f'Paragraph {i}' for i in range(10)))
+    boundary = len(target.getvalue())
+    terminal.write('Response cancelled.')
+    final = target.getvalue()[boundary:]
+    assert terminal._reply_live is None
+    assert '\x1b[?25h' in final
+    assert '\x1b[?1049' not in target.getvalue()
+    for i in range(10):
+        assert final.count(f'Paragraph {i}') == 1
+    assert final.index('Paragraph 9') < final.index('Response cancelled.')
+
+
+def test_diff_color_preserves_review_text_and_pager_uses_same_colors():
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.styles import Style
+    from rich.text import Text
+    from skua.terminal import ReviewLexer
+    target = StringIO()
+    terminal = Terminal(console=Console(file=target, force_terminal=True, color_system='truecolor', no_color=False, width=80), output=DummyOutput())
+    review = 'Review [bold]literal\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n context'
+    terminal.write_review(review)
+    rendered = Text.from_ansi(target.getvalue())
+    assert '\n'.join(line.rstrip() for line in rendered.plain.splitlines()) == review
+    for text, background in [('-old', (72, 35, 41)), ('+new', (22, 59, 43))]:
+        start = rendered.plain.index(text)
+        first = rendered.get_style_at_offset(terminal.console, start)
+        last = rendered.get_style_at_offset(terminal.console, start + 79)
+        assert tuple(first.bgcolor.triplet) == background
+        assert first.bgcolor == last.bgcolor
+        assert tuple(first.color.triplet) == (229, 231, 235)
+    lexer = ReviewLexer(lambda: 80).lex_document(Document(review))
+    assert lexer(4) == [('#e5e7eb bg:#482329', '-old'.ljust(80))]
+    assert lexer(5) == [('#e5e7eb bg:#163b2b', '+new'.ljust(80))]
+    for i in range(7):
+        Style.from_dict({'line': lexer(i)[0][0]})
+
+
+def test_terminal_enables_color_despite_inherited_no_color(monkeypatch):
+    import skua.terminal as ui
+    from prompt_toolkit.output.color_depth import ColorDepth
+    monkeypatch.setenv('NO_COLOR', '1')
+    target = StringIO()
+    monkeypatch.setattr(ui, 'Console', lambda **kwargs: Console(
+        file=target, force_terminal=True, color_system='truecolor', **kwargs))
+    terminal = Terminal(output=DummyOutput())
+    terminal.write_review('+added\n-removed')
+    assert not terminal.console.no_color
+    assert terminal.prompt.color_depth == ColorDepth.DEPTH_24_BIT
+    assert '\x1b[38;2;229;231;235;48;2;22;59;43m' in target.getvalue()
+    assert '\x1b[38;2;229;231;235;48;2;72;35;41m' in target.getvalue()
+
+
+def test_diff_backgrounds_remain_colored_on_16_color_terminals():
+    from rich.text import Text
+    target = StringIO()
+    console = Console(file=target, force_terminal=True, color_system='standard', no_color=False)
+    terminal = Terminal(console=console, output=DummyOutput())
+    terminal.write_review('+added\n-removed')
+    rendered = Text.from_ansi(target.getvalue())
+    assert rendered.get_style_at_offset(console, rendered.plain.index('+added')).bgcolor.number == 2
+    assert rendered.get_style_at_offset(console, rendered.plain.index('-removed')).bgcolor.number == 1
+
+
 def test_active_ctrl_c_returns_to_prompt(workspace):
     import signal
     cfg = build_config(workspace, [('test', {'schema_version':1,'profiles':{'default':{'base_url':'https://example/v1','model':'m'}}})])
@@ -120,7 +204,7 @@ def test_active_ctrl_c_returns_to_prompt(workspace):
     assert state.events[-1]['status'] == 'cancelled'
     assert state.events[-2]['text'] == 'partial'
     assert signal.getsignal(signal.SIGINT) == original
-    assert any('Returned to the prompt' in line for line in output)
+    assert any('Response cancelled.' in line for line in output)
 
 
 def test_startup_capability_failure_never_opens_conversation(workspace):

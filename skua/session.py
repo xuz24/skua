@@ -25,6 +25,7 @@ class Session:
         self.created_at = timestamp()
         self.initial_model = identity
         self.events: list[dict] = []
+        self.compaction: dict | None = None
         self.active_turn: int | None = None
         self.name: str | None = None
         self.destination: Path | None = None
@@ -34,7 +35,7 @@ class Session:
         self._saved_state = self._state()
 
     def _state(self):
-        return hashlib.sha256(json.dumps([self.name, self.events], sort_keys=True).encode()).digest()
+        return hashlib.sha256(json.dumps([self.name, self.events, self.compaction], sort_keys=True).encode()).digest()
 
     @property
     def dirty(self) -> bool:
@@ -87,9 +88,13 @@ class Session:
     def notice(self, code: str, text: str):
         self._append('notice', turn=self.active_turn, code=code, text=text)
 
-    def messages(self) -> list[dict]:
+    def messages(self, *, after_seq: int = 0, through_seq: int | None = None) -> list[dict]:
         result = []
         for event in self.events:
+            if event['seq'] <= after_seq:
+                continue
+            if through_seq is not None and event['seq'] > through_seq:
+                break
             if event['type'] == 'message':
                 text = event['text']
                 if event['completion'] == 'interrupted':
@@ -107,3 +112,28 @@ class Session:
                 result.append({'role': 'tool', 'tool_call_id': f"skua_call_{event['call_seq']}",
                                'content': event['model_text']})
         return result
+
+    def active_messages(self) -> list[dict]:
+        """Reduced model context, while canonical events remain complete."""
+        if not self.compaction:
+            return self.messages()
+        return [{'role': 'system', 'content': 'Summary of earlier conversation (user-approved compaction):\n'
+                 + self.compaction['summary']}, *self.messages(after_seq=self.compaction['through_seq'])]
+
+    def compaction_input(self, keep_turns: int = 2):
+        """Return messages and complete event boundary for a useful old prefix."""
+        if self.active_turn is not None:
+            raise ValueError('cannot compact during a turn')
+        users = [e for e in self.events if e['type'] == 'message' and e['role'] == 'user']
+        if len(users) <= keep_turns:
+            raise ValueError('There is not enough older conversation to compact.')
+        starts = [i for i, event in enumerate(self.events) if event['type'] == 'message' and event['role'] == 'user']
+        through = self.events[starts[-keep_turns]]['seq'] - 1
+        if self.compaction and through <= self.compaction['through_seq']:
+            raise ValueError('There are no additional older turns to compact.')
+        if self.compaction:
+            selected = [{'role': 'system', 'content': 'Summary of earlier conversation:\n' + self.compaction['summary']}]
+            selected.extend(self.messages(after_seq=self.compaction['through_seq'], through_seq=through))
+        else:
+            selected = self.messages(through_seq=through)
+        return selected, through

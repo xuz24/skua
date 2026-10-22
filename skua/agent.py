@@ -30,7 +30,7 @@ def batch(session, reply):
 
 
 async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=lambda _: None,
-                   on_notice=lambda _: None, runtime=None) -> None:
+                   on_notice=lambda _: None, on_waiting=lambda _: None, runtime=None) -> None:
     session.begin(text)
     partial = []
     pending = []
@@ -38,7 +38,14 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
     dispatched = 0
     stopped = False
     executing = False
+    working = False
+    def set_working(active):
+        nonlocal working
+        if working != active:
+            working = active
+            on_waiting(active)
     def delta(value):
+        set_working(False)
         partial.append(value)
         on_text(value)
     def retry(attempt, delay):
@@ -69,7 +76,8 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
             if runtime and not stopped:
                 kwargs['tools'] = CATALOG
             try:
-                reply = await client.complete([*system, *session.messages()], **kwargs)
+                set_working(True)
+                reply = await client.complete([*system, *session.active_messages()], **kwargs)
             except ModelError as exc:
                 if runtime and not stopped and exc.code in {'invalid_response', 'unsupported_tools'} and corrections < 3:
                     corrections += 1
@@ -79,6 +87,8 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                                    'using only the supplied function names and JSON argument schemas.'})
                     continue
                 raise
+            finally:
+                set_working(False)
             if not reply.calls:
                 session.finish(reply.text)
                 return
@@ -116,7 +126,7 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                 if result.status == 'cancelled' or asyncio.current_task().cancelling():
                     not_run('Turn cancelled before dispatch.')
                     session.finish('', 'cancelled', 'user_cancelled')
-                    on_notice('Operation cancelled. Returned to the prompt.')
+                    on_notice('Operation cancelled.')
                     return
                 if result.status == 'denied' or corrections >= 4 or result.code == 'lint_exhausted':
                     not_run('Automatic work stopped before dispatch.')
@@ -130,7 +140,7 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
         not_run('Turn cancelled before dispatch.')
         session.notice('cancelled', 'Response cancelled; partial text is incomplete.')
         session.finish(''.join(partial), 'cancelled', 'user_cancelled')
-        on_notice('Response cancelled. Returned to the prompt.')
+        on_notice('Response cancelled.')
     except (ModelError, AccessError) as exc:
         not_run('Turn stopped before dispatch.')
         code = exc.code if isinstance(exc, ModelError) else 'instructions_error'

@@ -8,7 +8,8 @@ shell execution, streaming terminal conversation, and local/endpoint diagnostics
 Conversation history stays in memory until explicitly saved. JSONL save/resume,
 Markdown export, session locks, project instructions, read/search tools, and approved
 shell commands are implemented, together with reviewed text patches, recovery,
-Git checkpoints/commits, lint correction, and undo. M7 validation is next.
+Git checkpoints/commits, lint correction, and undo. M7 acceptance and installation
+checks pass locally; the configured remote platform matrix awaits CI results.
 
 ## Install from this checkout
 
@@ -123,9 +124,8 @@ model = "project-model"
 enabled = false
 ```
 
-See the [configuration schema](.docs/config-schema.md) for all fields. Configuration
-accepts future milestone settings, but those settings do not enable tools that
-have not yet been implemented. Read and command approval rules are described below.
+See the [configuration schema](.docs/config-schema.md) for all fields. Read and
+command approval rules are described below.
 
 ## Conversation and endpoint diagnostics
 
@@ -145,11 +145,28 @@ Enter sends; Alt+Enter inserts a newline. Bracketed multiline paste remains in t
 editable input buffer until submitted. Ctrl-C cancels an active response and
 returns to the prompt, or clears an unsent draft. With an empty draft, two
 consecutive Ctrl-C presses request exit; Ctrl-D on empty input does the same.
+The scrolling prompt uses a single-row shaded input area, a simple chevron, keyboard hints, and Tab completion
+for discovered project paths. Completion lists names only; it does not read or
+attach file contents. `/context` shows an approximate token estimate based on
+serialized character count; compatible endpoints may use different tokenization
+and Skua does not assume a provider context limit. `/compact` asks the model to
+summarize older complete turns while keeping the latest two turns in active
+context. Compaction is manual, cancellable, and never removes canonical history.
 `/help`, `/new`, and `/exit` are available. New/exit/session switching with unsaved
 history offers Save / Discard / Cancel. Nothing writes transcripts, notes, or
 terminal history files automatically.
 
-Text streams as plain text; partial replies remain marked incomplete in memory
+The startup animation plays on the first interactive launch for an installation.
+Set `[ui].startup_animation` to `"always"` to replay on every launch or `"never"`
+to suppress it. Its first-run marker is stored in the user's global state directory
+and shared across projects.
+It plays in place in the normal terminal buffer, then clears its own rows.
+Pure black animation backgrounds use the terminal's default background.
+
+Replies stream as Markdown, with formatted lists, tables, and code blocks.
+Diff reviews use full-line green backgrounds for additions, red for deletions,
+and muted blue-gray for headers, with neutral text,
+including in the scrollable review pager. Partial replies remain marked incomplete in memory
 after cancellation or failure. The HTTP client reuses connections, uses a 10-second
 connect timeout, 60-second I/O timeout, and 300-second total deadline per attempt.
 Temporary transport failures and HTTP 408/429/500/502/503/504 retry up to three times
@@ -229,7 +246,10 @@ External paths in the same repository retain normal outside-root approval rules;
 external non-Git files can be patched in a non-Git workflow. Untracked ignored
 files cannot be included in managed commits.
 
-In Git projects, the prompt says **apply and commit**. Dirty target files first
+In Git projects, patch approval permits the edits; committing is reviewed separately.
+After lint, Skua generates a commit subject from the final reviewed diff and shows
+the exact message and diff in one commit approval. Command changes also use one
+commit approval, separate from command execution. Declining leaves edits uncommitted. Dirty target files first
 require a separate checkpoint review of existing working and staged changes.
 Declining that checkpoint stops the entire patch. Commits use a temporary index;
 unrelated staged and unstaged work stays intact. Skua uses your Git identity and
@@ -392,3 +412,16 @@ matrix. Tests use temporary homes/projects and do not need an endpoint or real k
 
 Design: [implementation plan](.docs/implementation-plan.md),
 [session schema](.docs/session-schema.md), and [product decisions](.docs/design.md).
+
+## Validation
+
+Run `python -m pytest -q` for behavioral and complete workflow checks.
+`python scripts/verify_install.py` builds a wheel and verifies it in a fresh venv
+with pinned dependencies, outside the checkout. It downloads dependencies unless
+`--wheelhouse /path/to/wheels` selects an offline cache.
+
+Local acceptance passed on macOS arm64 with Python 3.12.8 and 3.13.7, Bash/Zsh,
+and both streaming modes using mocked endpoints. GitHub Actions is configured for
+Ubuntu/macOS and Python 3.12–3.14; those remote jobs have not been verified in this
+session. See [VALIDATION.md](VALIDATION.md) for evidence, reproduction commands,
+coverage limits, and explicitly opt-in live checks.

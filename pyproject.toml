@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skua"
-version = "0.1.0"
+version = "1.0.0"
 description = "A lightweight terminal coding harness"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,9 @@ skua = "skua.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["skua*"]
+
+[tool.setuptools.package-data]
+skua = ["assets/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

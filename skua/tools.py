@@ -264,14 +264,13 @@ class Runtime:
                     reasons.add('outside_root')
                 if any(p.startswith('.') and p not in {'.', '..'} for p in Path(value).parts):
                     hidden.append(value)
-        summary = (f'Execute in {config.root} using {invocation.shell}:\n{command}\n'
-                   f'Timeout: {config.commands.timeout_seconds} seconds.\n'
-                   f'Shell startup: {"enabled" if config.shell.startup_enabled else "disabled"}; '
+        summary = (f'Run in {config.root} ({invocation.shell}):\n{command}\n'
+                   f'Timeout: {config.commands.timeout_seconds}s · '
+                   f'startup: {"on" if config.shell.startup_enabled else "off"} · '
                    f'environment: {config.environment.kind} '
-                   f'{config.environment.path or config.environment.name or ""}. '
-                   'Startup/activation scripts may run.\n'
-                   'Command output is sent to the model. This approval permits command side effects. '
-                   'Path inspection is best-effort, not a filesystem sandbox.')
+                   f'{config.environment.path or config.environment.name or ""}\n'
+                   'May run startup/activation scripts and modify files outside this project. '
+                   'Output is sent to the model.')
         if 'sensitive' in reasons:
             summary += '\nDetected sensitive paths: approval also permits exposing their contents to the model.'
         if hidden:
@@ -301,7 +300,10 @@ class Runtime:
         summary += 'it is not a complete audit or rollback.'
         if before_partial or after_partial or len(changes) > 200:
             summary += ' Change listing is incomplete.'
-        self.on_notice(summary + f'\nRetained output: /output {call_seq}')
+        notice = '\n'.join(f'{x["change"]}: {x["path"]}' for x in changes[:200])
+        if before_partial or after_partial or len(changes) > 200:
+            notice += '\nChange listing is incomplete.'
+        self.on_notice((notice.strip() + '\n' if notice.strip() else '') + f'Output: /output {call_seq}')
         status = result.status if result.status != 'completed' else ('ok' if result.returncode == 0 else 'error')
         committed = None
         if status != 'cancelled' and not (before_partial or after_partial):

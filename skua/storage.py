@@ -166,7 +166,7 @@ def validate(header: dict, events: list[dict], root: Path):
         check(PROFILE_NAME.fullmatch(value['profile']) is not None, field)
         check(_valid_url(value['base_url']), field)
         text(value['model'], field, True)
-    fields(header, HEADER, 'header')
+    check(isinstance(header, dict) and frozenset(header) in {frozenset(HEADER), frozenset(HEADER | {'compaction'})}, 'header fields')
     check(header['type'] == 'session', 'type')
     check(type(header['schema_version']) is int and header['schema_version'] == 1, 'schema_version')
     try:
@@ -183,6 +183,16 @@ def validate(header: dict, events: list[dict], root: Path):
     identity(header['initial_model'], 'initial_model')
     integer(header['event_count'], 'event_count')
     check(header['event_count'] == len(events), 'event_count')
+    if 'compaction' in header:
+        compaction = header['compaction']
+        fields(compaction, {'version', 'through_seq', 'summary'}, 'compaction')
+        check(type(compaction['version']) is int and compaction['version'] == 1, 'compaction.version')
+        integer(compaction['through_seq'], 'compaction.through_seq', 1)
+        check(compaction['through_seq'] < len(events), 'compaction.through_seq')
+        text(compaction['summary'], 'compaction.summary', True)
+        check(len(compaction['summary'].encode('utf-8')) <= 1_000_000, 'compaction.summary')
+        check(events[compaction['through_seq']].get('role') == 'user'
+              and events[compaction['through_seq']].get('type') == 'message', 'compaction boundary')
     current_model = header['initial_model']
     active = None
     calls = {}
@@ -323,10 +333,13 @@ def decode(data: bytes, root: Path) -> tuple[dict, list[dict]]:
 
 
 def _header(session: Session, name: str | None):
-    return {'type':'session', 'schema_version':1, 'session_id':session.session_id,
+    header = {'type':'session', 'schema_version':1, 'session_id':session.session_id,
             'project_root':str(session.project_root), 'created_at':session.created_at,
             'saved_at':timestamp(), 'name':name, 'initial_model':asdict(session.initial_model),
             'event_count':len(session.events)}
+    if session.compaction is not None:
+        header['compaction'] = dict(session.compaction)
+    return header
 
 
 def encoded(session: Session, name: str | None) -> bytes:
@@ -420,6 +433,7 @@ class Store:
             session.created_at = header['created_at']
             session.name = header['name']
             session.events = events
+            session.compaction = header.get('compaction')
             session.destination = path
             session.saved_bytes = data
             session.mark_saved()
@@ -504,6 +518,8 @@ class Store:
 
 def markdown(session: Session) -> str:
     parts = [f'<!-- skua-session: {session.session_id} -->\n# Skua session\n\nSession: {session.session_id}\n']
+    if session.compaction:
+        parts.append(f"\nCompacted active context through event {session.compaction['through_seq']}; full canonical history follows.\n")
     if session.name:
         parts.append(f'\n<pre>Name: {html.escape(session.name)}</pre>\n')
     for event in session.events:

@@ -88,8 +88,11 @@ def test_checkpoint_then_patch_separate_commits(workspace):
     parent = git(workspace, 'rev-parse', 'HEAD^')
     assert repo.metadata(parent)['type'] == 'checkpoint'
     assert git(workspace, 'show', 'HEAD^:a.txt') == 'user edit'
-    assert [r.action for r in reviews] == ['checkpoint', 'patch']
+    assert [r.action for r in reviews] == ['checkpoint', 'patch', 'commit']
+    assert 'Exact commit message:' in reviews[-1].summary
     assert 'user edit' in reviews[0].summary
+    assert git(workspace, 'show', '-s', '--format=%B', 'HEAD^') in reviews[0].summary
+    assert git(workspace, 'show', '-s', '--format=%B', 'HEAD') in reviews[-1].summary
 
 
 def test_checkpoint_decline_stops_entire_patch(workspace):
@@ -236,7 +239,7 @@ def test_failed_checkpoint_hook_stops_patch(workspace):
     assert (workspace / 'a.txt').read_text() == 'user work'
 
 
-def test_successful_hook_staging_is_included_without_second_approval(workspace):
+def test_successful_hook_staging_is_included_in_final_commit_review(workspace):
     init(workspace)
     hook(workspace, 'printf hook-change > a.txt\ngit add a.txt\n')
     reviews = []
@@ -246,7 +249,8 @@ def test_successful_hook_staging_is_included_without_second_approval(workspace):
     result, _ = turn(workspace, Runtime(config(workspace), approve=approve), edit())
     assert result['status'] == 'ok', result
     assert git(workspace, 'show', 'HEAD:a.txt') == 'hook-change'
-    assert len(reviews) == 1
+    assert [r.action for r in reviews] == ['patch', 'commit']
+    assert 'Exact commit message:' in reviews[-1].summary
     assert result['data']['hooks'] == ['pre-commit']
 
 
@@ -488,7 +492,15 @@ def test_undo_deleted_sensitive_file_requires_read_approval(workspace):
 
 def test_command_changes_commit_only_reviewed_nonignored_paths(workspace):
     repo = init(workspace)
-    runtime = Runtime(config(workspace), approve=yes)
+    reviews = []
+    async def approve(review):
+        reviews.append(review)
+        return 'approved'
+    class Client:
+        async def complete(self, messages):
+            return Reply('Record command output')
+    runtime = Runtime(config(workspace), approve=approve)
+    runtime.client = Client()
     session = state(workspace)
     session.begin('command')
     session._append('message', role='assistant', text='', completion='complete', turn=1, call_seqs=[3])
@@ -501,6 +513,9 @@ def test_command_changes_commit_only_reviewed_nonignored_paths(workspace):
     assert result.data['commit']['commit'] == repo.head()
     assert git(workspace, 'show', 'HEAD:a.txt') == 'command'
     assert not git(workspace, 'ls-files', 'ignored')
+    assert [review.action for review in reviews] == ['command', 'commit']
+    assert git(workspace, 'show', '-s', '--format=%s', 'HEAD') == 'Record command output'
+    assert git(workspace, 'show', '-s', '--format=%B', 'HEAD') in reviews[-1].summary
     decode(encoded(session, None), workspace)
 
 

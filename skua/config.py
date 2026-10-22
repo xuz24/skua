@@ -36,6 +36,7 @@ SCHEMA = {
     "agent": {"tool_calls_per_block": "positive"},
     "notes": {"directory": "path"}, "sessions": {"directory": "path"},
     "lint": {"enabled": "bool", "command": "text"},
+    "ui": {"startup_animation": "startup_animation"},
     "sensitive": {"filenames": "filenames", "patterns": "patterns"},
 }
 DEFAULTS: dict[str, Any] = {
@@ -47,6 +48,7 @@ DEFAULTS: dict[str, Any] = {
     "agent": {"tool_calls_per_block": 20},
     "notes": {"directory": ".notes"}, "sessions": {"directory": ".skua/sessions"},
     "lint": {"enabled": False}, "sensitive": {"filenames": [], "patterns": []},
+    "ui": {"startup_animation": "once"},
 }
 PROFILE_DEFAULTS = {"stream": True, "auth": {"enabled": True, "env_var": "SKUA_API_KEY"}}
 
@@ -117,6 +119,7 @@ class Config:
     sessions_directory: Path
     lint: Lint
     sensitive: Sensitive
+    startup_animation: str
     # These contain configuration only, never resolved credential values.
     sources: Mapping[str, str] = field(repr=False)
     raw: Mapping[str, Any] = field(repr=False)
@@ -177,6 +180,9 @@ def _validate_leaf(value: Any, rule: str, source: str, path: str) -> None:
     expectation = rule
     if rule == "bool":
         valid, expectation = type(value) is bool, "expected a boolean"
+    elif rule == "startup_animation":
+        valid = isinstance(value, str) and value in {"once", "always", "never"}
+        expectation = "expected once, always, or never"
     elif rule == "version":
         valid, expectation = type(value) is int and value == 1, "expected schema_version = 1"
     elif rule == "positive":
@@ -352,6 +358,7 @@ def build_config(root: Path, layers: list[tuple[str, dict[str, Any]]],
         sessions_directory=resolve(raw["sessions"]["directory"]),
         lint=Lint(raw["lint"]["enabled"], raw["lint"].get("command")),
         sensitive=Sensitive(tuple(raw["sensitive"]["filenames"]), tuple(raw["sensitive"]["patterns"])),
+        startup_animation=raw["ui"]["startup_animation"],
         sources=sources, raw=raw,
     )
 
