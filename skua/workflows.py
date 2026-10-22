@@ -64,8 +64,8 @@ class Workflows:
     def root(self):
         return self.runtime.config.root
 
-    async def review(self, session, call_seq, action, paths, summary, evidence, reasons=None):
-        review = Review.create(action, reasons or ['write'], [str(p) for p in paths], summary, evidence)
+    async def review(self, session, call_seq, action, paths, summary, evidence, reasons=None, *, policy_paths=()):
+        review = Review.create(action, reasons or ['write'], [str(p) for p in paths], summary, evidence, policy_paths=policy_paths)
         return await self.runtime.review(session, call_seq, review)
 
     async def history_access(self, session, call_seq, paths):
@@ -85,7 +85,7 @@ class Workflows:
         if any(event['type'] == 'approval' and event['action'] == 'checkpoint'
                and event['summary'].startswith('Initialize Git at ') for event in session.events):
             self.init_offered = True
-        if repo is None and not self.init_offered:
+        if self.runtime.config.managed_git and repo is None and not self.init_offered:
             self.init_offered = True
             decision = await self.review(session, call_seq, 'checkpoint', [self.root],
                                          f'Initialize Git at {self.root}? Declining permits approved edits without commit-based undo.',
@@ -98,7 +98,7 @@ class Workflows:
         target_repos = await asyncio.to_thread(lambda: [Repo.find(p) for p in paths])
         if any(r != repo for r in target_repos):
             raise GitError('Split patches by repository. External or nested-repository targets need their own workflow.')
-        if repo:
+        if repo and self.runtime.config.managed_git:
             await asyncio.to_thread(repo.validate_targets, paths)
         return repo
 
@@ -170,24 +170,27 @@ class Workflows:
                     self.pending = None
                     return Result('error', 'Lint correction limit exhausted; changes remain uncommitted.', code='lint_exhausted')
             new_paths = [p for p in patch.before if not pending or p not in pending.expected]
-            if repo:
+            if repo and self.runtime.config.managed_git:
                 refused = await self.checkpoint(session, call_seq, repo, patch, new_paths)
                 if refused:
                     self.pending = None
                     return refused
             identity = await asyncio.to_thread(repo.identity) if repo else None
             diff = patch.diff()
-            reasons = ['write'] + (['git_change'] if repo else [])
+            managed = repo is not None and self.runtime.config.managed_git
+            reasons = ['write'] + (['git_change'] if managed else [])
             if any(not p.is_relative_to(self.root) for p in patch.before):
                 reasons.append('outside_root')
-            summary = ('Apply this patch (commit reviewed separately)' if repo else 'Apply this patch (no Git undo)')
+            summary = ('Apply this patch (commit reviewed separately)' if managed else
+                       'Apply this patch (leave edits uncommitted; preserve existing staging; no Skua undo for these edits)')
             if pending:
                 summary += f' as correction {pending.corrections + 1}/3 of the pending change'
             summary += '.\n' + diff
             if self.runtime.config.lint.enabled:
-                summary += '\nConfigured lint requires separate command approval before commit.'
+                summary += '\nConfigured lint requires separate command approval.'
             decision = await self.review(session, call_seq, 'patch', list(patch.before), summary,
-                                         [identity[0] if identity else None, diff], reasons)
+                                         [identity[0] if identity else None, diff], reasons,
+                                         policy_paths=[item.requested for item in patch.before.values()])
             if decision != 'approved':
                 self.pending = None
                 return Result(decision, 'Patch not applied; any earlier pending edits remain uncommitted.')
@@ -254,10 +257,11 @@ class Workflows:
             for path in pending.expected:
                 current = await asyncio.to_thread(current_state, path)
                 pending.expected[path] = (current.content, current.mode)
+        output = lint.output if config.lint.enabled else None
         await asyncio.to_thread(self.check_pending)
         self.pending = None
-        if not pending.repo:
-            return Result('ok', 'Patch applied without Git; commit-based undo is unavailable.')
+        if not self.runtime.config.managed_git or not pending.repo:
+            return Result('ok', 'Patch applied; edits remain uncommitted. Skua commit-based undo is unavailable for these edits.', output=output)
         diff = ''
         for path in pending.expected:
             old = await asyncio.to_thread(pending.repo.head_content, path)
@@ -266,19 +270,19 @@ class Workflows:
         try:
             title = await self.commit_title(diff, pending.title)
         except Exception as exc:
-            return Result('error', f'Could not generate a commit message; edits remain uncommitted. {exc}', code='commit_title')
+            return Result('error', f'Could not generate a commit message; edits remain uncommitted. {exc}', output=output, code='commit_title')
         decision = await self.review(session, call_seq, 'commit', list(pending.expected),
             'Commit these changes?\n'
             'Exact commit message:\n' + self.commit_message_preview(title, 'change', pending.change_id) + '\n\n' + diff,
             [pending.identity[0], diff, title,
              self.commit_message_preview(title, 'change', pending.change_id)], ['git_change'])
         if decision != 'approved':
-            return Result(decision, 'Commit was not approved; reviewed edits remain uncommitted.')
+            return Result(decision, 'Commit was not approved; reviewed edits remain uncommitted.', output=output)
         await asyncio.to_thread(self.check_pending)
         result = await mutation(pending.repo.commit, list(pending.expected), title, 'change',
                                 pending.change_id, pending.identity)
         self.report_commit(result)
-        return Result('ok', 'Patch applied. ' + result['message'] + (f" Commit: {result['commit']}" if result['commit'] else ''), result)
+        return Result('ok', 'Patch applied. ' + result['message'] + (f" Commit: {result['commit']}" if result['commit'] else ''), result, output=output)
 
     async def commit_title(self, diff, description):
         client = getattr(self.runtime, 'client', None)
@@ -333,6 +337,13 @@ class Workflows:
     async def undo(self, session, strategy=None):
         from .tools import Result
         try:
+            if not self.runtime.config.managed_git:
+                raise GitError('Managed Git is disabled; /undo is unavailable. Edits remain uncommitted. '
+                               'Enable git.managed to undo eligible earlier Skua commits.')
+            if strategy is None:
+                strategy = 'revert'
+            if strategy not in {'local', 'revert'}:
+                raise GitError('Choose /undo, /undo revert, or /undo local.')
             if self.pending:
                 raise GitError('Finish or abandon the pending lint change before undo.')
             repo = await asyncio.to_thread(Repo.find, self.root)
@@ -341,20 +352,6 @@ class Workflows:
             target = await asyncio.to_thread(repo.undo_target)
             if not target:
                 raise GitError('No consecutive Skua change at the tip; checkpoints and other commits are protected.')
-            decision = await self.review(session, None, 'fetch', [repo.root],
-                'Fetch all configured remotes before checking publication? This accesses the network. '
-                'Declining leaves publication status unknown.', [target], ['network', 'git_change'])
-            fetched = decision == 'approved' and await mutation(repo.fetch)
-            if asyncio.current_task().cancelling():
-                return Result('cancelled', 'Undo cancelled after fetch; files and history unchanged.')
-            published = fetched and await asyncio.to_thread(repo.published, target)
-            if decision == 'cancelled':
-                return Result('cancelled', 'Undo cancelled.')
-            if published:
-                strategy = 'revert'
-            elif strategy not in {'local', 'revert'}:
-                return Result('error', 'Publication is unknown; no files/history changed. Choose /undo local only if you confirm '
-                              'the change was never shared, or /undo revert to preserve history.', code='publication_unknown')
             expected = await asyncio.to_thread(repo.identity)
             if strategy == 'local' and target != expected[0]:
                 raise GitError('Local undo requires the target at the current tip; use /undo revert for a reversal chain.')
@@ -392,7 +389,7 @@ class Workflows:
             if strategy != 'local':
                 title = await self.commit_title(patch.diff(), 'Reverse the reviewed Skua change ' + target[:12] + '.')
                 message = self.commit_message_preview(title, 'undo', change_id, original=target)
-            review_text = (f'Undo {target} using {"local tip rewrite (you confirm never shared)" if strategy == "local" else "a new reversing commit"}.\n'
+            review_text = (f'Undo {target} using {"local tip rewrite (moves HEAD to the parent or an unborn branch; removes the tip from this branch)" if strategy == "local" else "a new reversing commit"}.\n'
                            + (('Exact commit message:\n' + message + '\n\n') if message else '') + patch.diff())
             decision = await self.review(session, None, 'undo', paths,
                 review_text,
@@ -417,7 +414,7 @@ class Workflows:
 
     async def command_before(self):
         """Capture only clean, discoverable text paths; ambiguous overlaps are excluded."""
-        if self.in_lint or self.pending:
+        if not self.runtime.config.managed_git or self.in_lint or self.pending:
             return None
         repo = await asyncio.to_thread(Repo.find, self.root)
         if not repo:
@@ -426,7 +423,7 @@ class Workflows:
             repo.run, 'status', '--porcelain=v1', '-z', '--untracked-files=all')
 
     async def command_commit(self, session, call_seq, baseline, changes):
-        if baseline is None or self.in_lint or self.pending:
+        if not self.runtime.config.managed_git or baseline is None or self.in_lint or self.pending:
             return None
         from .tools import Result
         repo, identity, status = baseline

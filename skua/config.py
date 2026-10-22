@@ -36,6 +36,7 @@ SCHEMA = {
     "agent": {"tool_calls_per_block": "positive"},
     "notes": {"directory": "path"}, "sessions": {"directory": "path"},
     "lint": {"enabled": "bool", "command": "text"},
+    "git": {"managed": "bool"},
     "ui": {"startup_animation": "startup_animation"},
     "sensitive": {"filenames": "filenames", "patterns": "patterns"},
 }
@@ -49,6 +50,7 @@ DEFAULTS: dict[str, Any] = {
     "notes": {"directory": ".notes"}, "sessions": {"directory": ".skua/sessions"},
     "lint": {"enabled": False}, "sensitive": {"filenames": [], "patterns": []},
     "ui": {"startup_animation": "once"},
+    "git": {"managed": True},
 }
 PROFILE_DEFAULTS = {"stream": True, "auth": {"enabled": True, "env_var": "SKUA_API_KEY"}}
 
@@ -120,6 +122,7 @@ class Config:
     lint: Lint
     sensitive: Sensitive
     startup_animation: str
+    managed_git: bool
     # These contain configuration only, never resolved credential values.
     sources: Mapping[str, str] = field(repr=False)
     raw: Mapping[str, Any] = field(repr=False)
@@ -359,6 +362,7 @@ def build_config(root: Path, layers: list[tuple[str, dict[str, Any]]],
         lint=Lint(raw["lint"]["enabled"], raw["lint"].get("command")),
         sensitive=Sensitive(tuple(raw["sensitive"]["filenames"]), tuple(raw["sensitive"]["patterns"])),
         startup_animation=raw["ui"]["startup_animation"],
+        managed_git=raw["git"]["managed"],
         sources=sources, raw=raw,
     )
 

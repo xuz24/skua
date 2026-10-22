@@ -1,5 +1,5 @@
-"""Per-operation reviews. No approval is reusable or restored from history."""
-from dataclasses import dataclass
+"""Explicit reviews and opt-in, in-memory session grants."""
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 import hashlib
 import json
@@ -115,13 +115,122 @@ class Review:
     targets: tuple[str, ...]
     summary: str
     review_sha256: str
+    policy_paths: tuple[str, ...] = ()
+    command: str | None = None
+    invocation: object = field(default=None, repr=False)
 
     @classmethod
-    def create(cls, action, reasons, targets, summary, evidence):
+    def create(cls, action, reasons, targets, summary, evidence, *, policy_paths=(), command=None, invocation=None):
         digest = hashlib.sha256(json.dumps([action, reasons, targets, summary, evidence],
                                           sort_keys=True, default=str).encode()).hexdigest()
-        return cls(action, tuple(sorted(set(reasons))), tuple(targets), summary, digest)
+        return cls(action, tuple(sorted(set(reasons))), tuple(targets), summary, digest,
+                   tuple(str(p) for p in policy_paths), command, invocation)
 
 
 async def deny_review(review):
     return 'denied'
+
+
+@dataclass(frozen=True)
+class Grant:
+    id: str
+    action: str
+    root: Path
+    scope: Path
+    anchors: tuple
+    command: str | None = None
+    invocation: object = field(default=None, repr=False)
+
+    @property
+    def description(self):
+        if self.action == 'patch':
+            return f'{self.id}: patch {self.scope} (recursive create/replace/delete/rename)'
+        return f'{self.id}: command in {self.root}: {self.command!r} (exact string and execution environment)'
+
+
+def directory_identity(path):
+    # Contents may evolve under a grant; replacing its directory invalidates it.
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode) or path.resolve() != path:
+        raise AccessError('Grant directory must be an existing directory without symlink aliases.')
+    return info.st_dev, info.st_ino, info.st_mode
+
+
+class SessionPolicy:
+    """No history/config restoration. Only the terminal's explicit grant control adds grants."""
+    def __init__(self):
+        self.grants = {}
+        self._next = 1
+
+    def prepare(self, config, action, value):
+        from .environment import prepare_command
+        root = config.root
+        if action == 'patch':
+            try:
+                scope = lexical(root, value)
+                if (not scope.is_relative_to(root) or sensitive(config, scope) or '.git' in scope.parts
+                        or scope.is_relative_to(root / '.skua/.tmp')):
+                    raise AccessError('Patch grants require a nonsensitive project directory outside Git/recovery storage.')
+            except (OSError, RuntimeError, ValueError):
+                raise AccessError('Grant directory is unavailable.') from None
+            command = invocation = None
+        elif action == 'command':
+            scope = root
+            if not value.strip() or len(value) > 100_000 or '\0' in value:
+                raise AccessError('Expected a nonempty command of at most 100000 characters without NUL.')
+            command = value
+            invocation = prepare_command(config, command)
+        else:
+            raise AccessError('Grant actions are patch or command.')
+        try:
+            anchors = (directory_identity(root), directory_identity(scope))
+        except (OSError, RuntimeError):
+            raise AccessError('Grant directory is unavailable.') from None
+        return Grant(str(self._next), action, root, scope, anchors, command, invocation)
+
+    def current(self, grant, config):
+        try:
+            return (grant.root == config.root and
+                    grant.anchors == (directory_identity(grant.root), directory_identity(grant.scope)))
+        except (AccessError, OSError, RuntimeError):
+            return False
+
+    def add(self, grant, config):
+        from .environment import prepare_command
+        if not self.current(grant, config) or (grant.command is not None and
+                prepare_command(config, grant.command) != grant.invocation):
+            raise AccessError('Grant scope or environment changed during confirmation; request it again.')
+        if grant.id != str(self._next):
+            raise AccessError('Grant changed during confirmation; request it again.')
+        self.grants[grant.id] = grant
+        self._next += 1
+
+    def revoke(self, identifier):
+        if identifier == 'all':
+            self.grants.clear()
+            return True
+        return self.grants.pop(identifier, None) is not None
+
+    def match(self, config, review):
+        if review.action not in {'patch', 'command'} or set(review.reasons) & {'sensitive', 'outside_root', 'network'}:
+            return None
+        if review.action == 'patch' and not review.policy_paths:
+            return None
+        paths = [Path(p) for p in review.policy_paths]
+        # Never use a resolved-only review to silently authorize a symlink alias.
+        try:
+            if any(not p.is_absolute() or not p.is_relative_to(config.root) or p.resolve() != p
+                   or sensitive(config, p) or '.git' in p.parts
+                   or p.is_relative_to(config.root / '.skua/.tmp') for p in paths):
+                return None
+            for grant in self.grants.values():
+                if grant.action != review.action or not self.current(grant, config):
+                    continue
+                if grant.action == 'patch' and all(p.is_relative_to(grant.scope) for p in paths):
+                    return grant
+                if (grant.action == 'command' and review.command == grant.command
+                        and review.invocation == grant.invocation):
+                    return grant
+        except (OSError, RuntimeError):
+            return None
+        return None

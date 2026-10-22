@@ -1,5 +1,73 @@
 # Validation and release evidence
 
+## Next-version M3 — scoped session permissions
+
+Local validation on 2026-10-21: **347 tests passed** with
+`.venv/bin/python -m pytest -q`; `git diff --check` passed. Fresh offline wheel
+installation passed with the cached runtime wheelhouse, including `pip check`,
+both entry points, and all Bash/Zsh × streaming/nonstreaming acceptance workflows.
+
+`tests/test_permissions.py` covers repeated granted operations, default review,
+revocation through terminal controls, scope boundaries, rename destinations,
+sensitive/external targets, symlinks, directory replacement, and stale file checks.
+Exact-command checks include whitespace, substitutions, pipelines, compound
+commands, and changed environments/startup configuration. Granted command
+cancellation retains output and marks the remaining batch as not run.
+
+Pipe-input and scripted terminal checks exercise Ctrl-C/denial during grant
+confirmation, changed scope during confirmation, listing/revocation, `/new`, and
+save/resume. Policy authorization is recorded distinctly; historical approvals and
+model text grant nothing. Existing v1 records without authorization metadata load,
+and malformed metadata is rejected. No live provider or remote CI is involved.
+
+## Next-version M2 — optional managed Git
+
+Local validation on 2026-10-21: **306 tests passed** with
+`.venv/bin/python -m pytest -q`; `git diff --check` passed.
+
+Completion checks in `tests/test_managed_git.py`, `tests/test_patches.py`, and
+`tests/test_setup.py` cover:
+
+- Git/non-Git edit/test/fix with managed Git disabled, no author identity or
+  commit-message requests, no initialization/checkpoint/commit offers, preserved
+  target staging and unrelated working changes, and separate lint approval.
+- Unmanaged command changes, ignored-file edits, configuration defaults and
+  inheritance, and documented undo unavailability in disabled mode.
+- File, HEAD, and index changes invalidating review; partial-patch restoration;
+  approved recovery in both modes while preserving newer user edits.
+- Default/explicit reversing undo and explicit local rewrites, with Git invocation
+  guards rejecting fetch and remote/publication inspection even when configured
+  remotes and remote-tracking refs exist.
+- Undo denial/cancellation, dirty targets, checkpoints, consecutive changes,
+  reversal chains, and unrelated staged/unstaged work.
+
+Fresh offline wheel installation passed using the cached runtime wheelhouse,
+including `pip check`, both entry points, and Bash/Zsh × streaming/nonstreaming
+mocked acceptance workflows. The installed acceptance script now reviews undo
+without a fetch prompt. No remote CI or live provider was used.
+
+## Next-version M1 — tool progress and feedback
+
+Local validation on 2026-10-21: **283 tests passed** with
+`.venv/bin/python -m pytest -q`; `git diff --check` passed.
+
+M1 completion checks are in `tests/test_activity.py`:
+
+- A real slow shell command refreshes its elapsed display while the event loop
+  remains responsive; SIGINT cancels it, retains output, and restores the handler.
+- Success, failure, timeout, denial, invalid calls, unexpected exceptions, and
+  cancellation finish the activity lifecycle without leaving an active display.
+- Ctrl-C cancels both short patch review and the full diff pager without editing
+  the target or leaving a spinner active.
+- A mocked streamed edit/test/fix turn runs real patches and lint, renders both
+  diffs, preserves all reply text exactly once, and retains failed and successful
+  lint output for `/output`.
+- Model waiting restores a surrounding tool operation; approval elapsed time
+  appears in the prompt toolbar. Existing `/output` checks verify no re-execution.
+
+These are automated local terminal/pipe-input checks, not a manual terminal
+walkthrough or live-provider validation. No M2 Git workflow changes are included.
+
 ## Local v1.0.0 checkpoint — 2026-10-21
 
 - Full local suite: **272 passed** after the final input and diff-highlight fixes.
@@ -50,7 +118,7 @@ and HTTPX MockTransport; it is not a manual interactive/live-provider test.
 5. Save explicitly, exit, resume, and inspect retained output without rerunning it.
 6. Deny a sensitive read and run an approved command that fails. Verify both outcomes
    survive in history and the sensitive fixture value never reaches the endpoint.
-7. Export Markdown, decline remote fetch, explicitly choose reversing undo twice,
+7. Export Markdown, explicitly choose reversing undo twice,
    save, and exit. Verify original target contents and unrelated staging remain intact.
 
 Both streaming modes use the real ChatClient parser. Python socket connection

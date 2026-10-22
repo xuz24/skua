@@ -317,48 +317,72 @@ def test_local_undo_and_checkpoint_boundary(workspace):
     assert asyncio.run(runtime.workflows.undo(state(workspace), 'local')).status == 'error'
 
 
-def test_unknown_publication_no_mutations(workspace):
+def test_default_undo_creates_reversing_commit(workspace):
     repo = init(workspace)
     runtime = Runtime(config(workspace), approve=yes)
     turn(workspace, runtime, edit())
-    before = repo.identity()
+    before = repo.head()
     result = asyncio.run(runtime.workflows.undo(state(workspace)))
-    assert result.code == 'publication_unknown'
-    assert repo.identity() == before
-    assert (workspace / 'a.txt').read_text() == 'changed\n'
+    assert result.status == 'ok'
+    assert repo.metadata(repo.head())['original'] == before
+    assert git(workspace, 'rev-parse', 'HEAD^') == before
+    assert (workspace / 'a.txt').read_text() == 'original\n'
 
 
-def test_repeated_reversals_do_not_redo(workspace):
+@pytest.mark.parametrize('strategy', [None, 'revert'])
+def test_repeated_reversals_do_not_redo(workspace, strategy):
     repo = init(workspace)
     runtime = Runtime(config(workspace), approve=yes)
     turn(workspace, runtime, edit(text='one\n'))
     first = repo.head()
     turn(workspace, runtime, edit(text='two\n'))
     second = repo.head()
-    result = asyncio.run(runtime.workflows.undo(state(workspace), 'revert'))
+    result = asyncio.run(runtime.workflows.undo(state(workspace), strategy))
     assert result.status == 'ok', result
     assert repo.metadata(repo.head())['original'] == second
     assert (workspace / 'a.txt').read_text() == 'one\n'
-    result = asyncio.run(runtime.workflows.undo(state(workspace), 'revert'))
+    result = asyncio.run(runtime.workflows.undo(state(workspace), strategy))
     assert result.status == 'ok', result
     assert repo.metadata(repo.head())['original'] == first
     assert (workspace / 'a.txt').read_text() == 'original\n'
-    assert asyncio.run(runtime.workflows.undo(state(workspace), 'revert')).status == 'error'
+    assert asyncio.run(runtime.workflows.undo(state(workspace), strategy)).status == 'error'
 
 
-def test_published_change_always_reverses(workspace):
+@pytest.mark.parametrize('strategy', [None, 'revert', 'local'])
+@pytest.mark.parametrize('remote_refs', [False, True])
+def test_undo_never_contacts_or_inspects_remotes(workspace, monkeypatch, strategy, remote_refs):
+    from skua import git as git_module
     repo = init(workspace)
-    remote = workspace.parent / 'remote.git'
-    subprocess.run(['git', 'init', '--bare', str(remote)], check=True, capture_output=True)
-    git(workspace, 'remote', 'add', 'origin', str(remote))
+    parent = repo.head()
     runtime = Runtime(config(workspace), approve=yes)
     turn(workspace, runtime, edit())
     original = repo.head()
-    git(workspace, 'push', '-u', 'origin', 'HEAD')
-    result = asyncio.run(runtime.workflows.undo(state(workspace), 'local'))
+    if remote_refs:
+        git(workspace, 'remote', 'add', 'origin', 'https://must-not-contact.invalid/repo')
+        git(workspace, 'update-ref', 'refs/remotes/origin/main', original)
+    invoke = git_module.invoke
+    def guarded(root, *args, **kwargs):
+        assert args[0] not in {'fetch', 'remote', 'ls-remote', 'for-each-ref'}
+        assert not any('refs/remotes' in arg or '--remotes' in arg or '--contains' in arg for arg in args)
+        return invoke(root, *args, **kwargs)
+    monkeypatch.setattr(git_module, 'invoke', guarded)
+    monkeypatch.setattr('skua.workflows.invoke', guarded)
+    reviews = []
+    async def approve(review):
+        reviews.append(review)
+        return 'approved'
+    runtime.approve = approve
+    result = asyncio.run(runtime.workflows.undo(state(workspace), strategy))
     assert result.status == 'ok', result
-    assert repo.metadata(repo.head())['type'] == 'undo'
-    assert git(workspace, 'rev-parse', 'HEAD^') == original
+    assert [r.action for r in reviews] == ['undo']
+    assert 'publication' not in reviews[0].summary and 'never shared' not in reviews[0].summary
+    if strategy == 'local':
+        assert repo.head() == parent
+        assert 'moves HEAD to the parent' in reviews[0].summary
+    else:
+        assert repo.metadata(repo.head())['original'] == original
+        assert git(workspace, 'rev-parse', 'HEAD^') == original
+        assert 'new reversing commit' in reviews[0].summary
 
 
 def test_command_commit_requires_separate_review(workspace):
@@ -417,33 +441,34 @@ def test_nested_repo_patch_rejected_without_changes(workspace):
     assert (workspace / 'a.txt').read_text() == (nested / 'a.txt').read_text() == 'original\n'
 
 
-def test_local_undo_preserves_unrelated_index(workspace):
+@pytest.mark.parametrize('strategy', [None, 'local'])
+def test_undo_preserves_unrelated_index(workspace, strategy):
     repo = init(workspace)
     runtime = Runtime(config(workspace), approve=yes)
     turn(workspace, runtime, edit())
     (workspace / 'b.txt').write_text('staged')
     git(workspace, 'add', 'b.txt')
     (workspace / 'b.txt').write_text('unstaged')
-    result = asyncio.run(runtime.workflows.undo(state(workspace), 'local'))
+    result = asyncio.run(runtime.workflows.undo(state(workspace), strategy))
     assert result.status == 'ok', result
     assert git(workspace, 'show', ':b.txt') == 'staged'
     assert (workspace / 'b.txt').read_text() == 'unstaged'
     assert repo.undo_target() is None
 
 
-def test_undo_declined_fetch_requires_explicit_choice(workspace):
+@pytest.mark.parametrize('decision', ['denied', 'cancelled'])
+def test_undo_declined_review_preserves_files_and_history(workspace, decision):
     repo = init(workspace)
     runtime = Runtime(config(workspace), approve=yes)
     turn(workspace, runtime, edit())
-    head = repo.head()
-    async def no_fetch(review):
-        return 'denied' if review.action == 'fetch' else 'approved'
-    runtime.approve = no_fetch
+    before = repo.identity()
+    async def decline(review):
+        assert review.action == 'undo'
+        return decision
+    runtime.approve = decline
     result = asyncio.run(runtime.workflows.undo(state(workspace)))
-    assert result.code == 'publication_unknown' and repo.head() == head
-    result = asyncio.run(runtime.workflows.undo(state(workspace), 'revert'))
-    assert result.status == 'ok'
-    assert git(workspace, 'rev-parse', 'HEAD^') == head
+    assert result.status == decision and repo.identity() == before
+    assert (workspace / 'a.txt').read_text() == 'changed\n'
 
 
 def test_undo_stops_on_newer_user_commit_and_dirty_target(workspace):
@@ -610,3 +635,32 @@ def test_oversized_review_rejected_before_approval(workspace):
     with pytest.raises(AccessError, match='record budget'):
         asyncio.run(runtime.review(session, None, review))
     assert not session.events
+
+
+@pytest.mark.parametrize('strategy', [None, 'local'])
+def test_undo_stops_at_existing_work_checkpoint(workspace, strategy):
+    repo = init(workspace)
+    (workspace / 'a.txt').write_text('preexisting user work\n')
+    runtime = Runtime(config(workspace), approve=yes)
+    turn(workspace, runtime, edit())
+    checkpoint = git(workspace, 'rev-parse', 'HEAD^')
+    assert repo.metadata(checkpoint)['type'] == 'checkpoint'
+    assert asyncio.run(runtime.workflows.undo(state(workspace), strategy)).status == 'ok'
+    assert (workspace / 'a.txt').read_text() == 'preexisting user work\n'
+    before = repo.identity()
+    assert asyncio.run(runtime.workflows.undo(state(workspace), strategy)).status == 'error'
+    assert repo.identity() == before
+
+
+def test_local_undo_rejects_target_behind_reversal_chain(workspace):
+    repo = init(workspace)
+    runtime = Runtime(config(workspace), approve=yes)
+    turn(workspace, runtime, edit(text='first\n'))
+    turn(workspace, runtime, edit(text='second\n'))
+    assert asyncio.run(runtime.workflows.undo(state(workspace))).status == 'ok'
+    before = repo.identity()
+    result = asyncio.run(runtime.workflows.undo(state(workspace), 'local'))
+    assert result.status == 'error' and 'current tip' in result.text
+    assert repo.identity() == before
+    assert asyncio.run(runtime.workflows.undo(state(workspace))).status == 'ok'
+    assert (workspace / 'a.txt').read_text() == 'original\n'

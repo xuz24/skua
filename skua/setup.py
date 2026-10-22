@@ -189,6 +189,7 @@ def run_setup(root: Path, *, project: bool = False, profile: str | None = None,
     prompt(("notes", "directory"), "Default notes directory")
     prompt(("sessions", "directory"), "Default session directory")
     prompt(("ui", "startup_animation"), "Startup animation (once, always, never)")
+    prompt(("git", "managed"), "Manage Git initialization, checkpoints, and commits", boolean=True)
     prompt(("lint", "enabled"), "Enable a project lint command", boolean=True)
     # Always allow editing the dormant command without enabling lint.
     prompt(("lint", "command"), "Lint command (optional when disabled)")

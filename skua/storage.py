@@ -204,7 +204,10 @@ def validate(header: dict, events: list[dict], root: Path):
         check(isinstance(record, dict), 'event')
         kind = record.get('type')
         check(isinstance(kind, str) and kind in PAYLOADS, 'type')
-        fields(record, {'type', 'seq', 'at'} | PAYLOADS[kind], 'event fields')
+        allowed = {'type', 'seq', 'at'} | PAYLOADS[kind]
+        if kind == 'approval' and 'authorization' in record:
+            allowed = allowed | {'authorization'}
+        fields(record, allowed, 'event fields')
         integer(record['seq'], 'seq', 1)
         check(record['seq'] == index, 'seq')
         date(record['at'], 'at')
@@ -245,6 +248,16 @@ def validate(header: dict, events: list[dict], root: Path):
             check(isinstance(record['arguments'], dict), 'arguments')
             calls[index] = active
         elif kind == 'approval':
+            if 'authorization' in record:
+                authorization = record['authorization']
+                fields(authorization, {'source', 'grant_id'}, 'authorization')
+                enum(authorization['source'], {'review', 'session_grant'}, 'authorization.source')
+                if authorization['source'] == 'review':
+                    check(authorization['grant_id'] is None, 'authorization.grant_id')
+                else:
+                    text(authorization['grant_id'], 'authorization.grant_id', True)
+                    check(re.fullmatch('[1-9][0-9]*', authorization['grant_id']) is not None, 'authorization.grant_id')
+                    check(record['decision'] == 'approved' and record['action'] in {'patch', 'command'}, 'grant authorization')
             if record['call_seq'] is not None:
                 integer(record['call_seq'], 'call_seq', 1)
                 check(record['call_seq'] in calls and calls[record['call_seq']] == active and record['call_seq'] not in results, 'call_seq')

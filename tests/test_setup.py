@@ -118,3 +118,15 @@ def test_setup_venv_default_path(workspace, global_file):
     put(global_file, BASE)
     run_setup(workspace, ask=answers({"Command environment:": "venv"}), emit=lambda _: None)
     assert load_config().environment.path == workspace / ".venv"
+
+
+def test_setup_managed_git_override_and_inheritance(workspace, global_file):
+    put(global_file, BASE + '\n[git]\nmanaged = true\n')
+    run_setup(workspace, project=True,
+              ask=answers({'Manage Git': 'no'}), emit=lambda _: None)
+    assert load_config().managed_git is False
+    assert tomllib.loads((workspace / '.skua/config.toml').read_text())['git'] == {'managed': False}
+    run_setup(workspace, project=True,
+              ask=answers({'Manage Git': ':inherit'}), emit=lambda _: None)
+    assert load_config().managed_git is True
+    assert global_file.read_text() == BASE + '\n[git]\nmanaged = true\n'

@@ -155,8 +155,8 @@ async def workflow(root, *, shell='/bin/bash', streaming=True):
         ('skua>', 'deny sensitive'), ('Approve', 'no'),
         ('skua>', 'failing command'), ('Approve', 'yes'),
         ('skua>', f'/export "{export_path}"'),
-        ('skua>', '/undo revert'), ('Approve', 'no'), ('Approve', 'yes'),
-        ('skua>', '/undo revert'), ('Approve', 'no'), ('Approve', 'yes'),
+        ('skua>', '/undo revert'), ('Approve', 'yes'),
+        ('skua>', '/undo revert'), ('Approve', 'yes'),
         ('skua>', '/save'), ('skua>', '/exit')])
     await start(config, terminal=resumed, client_factory=factory, resume=str(save_path))
     resumed.exhausted()

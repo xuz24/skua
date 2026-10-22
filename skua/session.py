@@ -32,6 +32,8 @@ class Session:
         self.saved_bytes: bytes | None = None
         self.lock = None
         self.exports: dict[str, bytes] = {}
+        from .permissions import SessionPolicy
+        self.permissions = SessionPolicy()
         self._saved_state = self._state()
 
     def _state(self):
@@ -59,6 +61,7 @@ class Session:
                          current=asdict(identity), reason='resume', confirmed=True)
 
     def close(self):
+        self.permissions.revoke("all")
         if self.lock is not None:
             self.lock.close()
             self.lock = None

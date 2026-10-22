@@ -186,10 +186,51 @@ project guidance, and permitted tool results to the configured endpoint.
 ## Read tools and approvals
 
 Chat exposes `list_files`, `read_file`, `search_files`, and `run_command`. Calls run
-sequentially. Every shell command requires approval; sensitive and outside-root
-reads require approval for each operation. Enter defaults to denial; type `y` or
+sequentially. Per-operation review is the default for shell commands and patches;
+sensitive and outside-root reads always require approval for each operation. Enter defaults to denial; type `y` or
 `yes` to approve. Ctrl-C cancels a pending approval. Denial stops further tools
 for that turn, and undispatched batch calls are recorded as `not_run`.
+
+Session permissions are opt-in through chat commands:
+
+```text
+/permissions
+/permissions grant patch src
+/permissions grant command "python -m pytest -q"
+/permissions revoke 1
+/permissions revoke all
+```
+
+`grant` shows the proposed scope and requires `y`/`yes`; Enter, denial, or Ctrl-C
+adds nothing. `/permissions` lists current grants and their IDs. Revocation takes
+effect before the next operation. Grants are cleared on `/new`, successful session
+switch/resume, and exit. Saving records the decisions for inspection, but never
+restores active grants. Model replies, tool output, project instructions, and
+historical approvals cannot create grants.
+
+A **patch grant** permits create, replace, delete, and rename within an existing
+project directory recursively. Every source and destination must be in scope;
+`src` does not include `src-other`. One grant must cover the entire patch; separate
+grants are not combined. Sensitive paths, external targets, Git metadata,
+recovery storage, and symlink aliases are excluded. Replacing the grant directory
+invalidates its scope. File contents may evolve between operations; each new patch
+still captures current contents and checks file and Git identities before writing.
+Git initialization, checkpoints, commits, undo, and recovery keep separate reviews.
+
+A **command grant** matches the entire shell string exactly, including whitespace,
+quoting, substitutions, pipes, redirects, and compound commands. It is not a prefix
+or executable-name grant: adding an argument or `; another-command` requires review.
+The resolved invocation, project working directory, shell/startup configuration,
+and effective environment must match the grant. Changed environment or replaced
+working directory falls back to review. Detected sensitive/external paths and
+symlink aliases also fall back to review. Shell inspection is best-effort: commands
+can execute changing project scripts, access paths indirectly, and affect files
+anywhere. The working directory is not a sandbox or a restriction on side effects.
+
+Matching operations show `Session grant <id>` and record the grant ID as the source
+of authorization; they skip the interactive review but retain normal tool progress,
+results, cancellation, and output capture. Grants work with either managed Git mode.
+Lint uses command authorization, so its exact command can have its own grant.
 
 Automatic listing/search uses the installed Git CLI's `.gitignore` matcher, even
 outside repositories. Explicit files can be read or searched despite ignore rules;
@@ -222,7 +263,18 @@ including in non-Git projects; `.git` and external paths are excluded. Observati
 is bounded and cannot establish a complete audit. A separate reviewed commit offer
 is available for attributable command changes; declining leaves them uncommitted.
 Use `/output <call-seq>` to inspect retained stdout/stderr without rerunning a
-command. Retained output is included when explicitly saving the session.
+command. Successful and failed lint output is retained on its patch call as well.
+Retained output is included when explicitly saving the session.
+
+During a turn, a refreshing activity line distinguishes waiting for the model,
+waiting for approval, and running a tool. It shows elapsed time and the tool's
+call number; approval timing appears in the prompt or diff pager so progress does
+not overwrite the review. Tool elapsed time includes its reviews and follow-up
+work. Each tool ends with a concise status (including denial, timeout, or
+cancellation), plus its exit code and `/output` link when available. Ctrl-C cancels
+active work and clears progress; captured command output remains inspectable.
+Streamed reply text is preserved when switching to reviews and tool summaries.
+Activity timing is temporary display state, not saved session history.
 
 ## Patches, recovery, and Git
 
@@ -240,13 +292,37 @@ before approval, keeping approval records within session limits. Sensitive/exter
 originals require read permission
 before diff preparation. Resolved paths and original identities are checked again
 before writing. Existing rename destinations are included in the full review.
-Binary files, Git metadata, recovery storage, conflicted indexes, and active
-merge/rebase operations are rejected. Split a patch that crosses repositories.
+Binary files, Git metadata, and recovery storage are rejected. Managed Git changes
+also reject conflicted indexes and active merge/rebase operations. Split a patch that crosses repositories.
 External paths in the same repository retain normal outside-root approval rules;
 external non-Git files can be patched in a non-Git workflow. Untracked ignored
 files cannot be included in managed commits.
 
-In Git projects, patch approval permits the edits; committing is reviewed separately.
+`git.managed` defaults to `true`, preserving the reviewed Git workflow below.
+To leave edits uncommitted in Git and non-Git projects, set this in your project
+or global configuration (also available through `skua init`):
+
+```toml
+[git]
+managed = false
+```
+
+With managed Git disabled, Skua makes no Git initialization, checkpoint, or commit
+offers and requests no commit messages from the model. Editing needs no Git author
+identity. Patch review uses the current working contents, including existing dirty
+targets; approved replacements can change those contents. Existing staging is left
+intact, including staged versions of edited targets, and unrelated work is preserved.
+File and Git HEAD/index identity checks still reject changes made during review.
+Recovery and separately configured lint remain available. Untracked ignored files
+can be edited in this mode. This setting controls Skua's managed workflow; an
+approved shell or lint command can still run Git or modify staging.
+
+`/undo` is unavailable while managed Git is disabled, and these uncommitted edits
+create no Skua undo entry. You can re-enable the setting to undo eligible earlier
+Skua commits, subject to the usual dirty-target checks. Recovery records support
+interrupted patches; they are not a general undo history for successful edits.
+
+With managed Git enabled in Git projects, patch approval permits the edits; committing is reviewed separately.
 After lint, Skua generates a commit subject from the final reviewed diff and shows
 the exact message and diff in one commit approval. Command changes also use one
 commit approval, separate from command execution. Declining leaves edits uncommitted. Dirty target files first
@@ -258,16 +334,17 @@ configured executable hooks without a second approval. Failed commits keep edits
 and hook changes. A subsequent attempt requires fresh review; hooks are never
 bypassed or silently retried.
 
-Outside Git, Skua offers `git init` once per session. Declining still permits
+With managed Git enabled outside Git, Skua offers `git init` once per session. Declining still permits
 reviewed edits, without commit-based undo. Initialization never authorizes a blanket
 commit of existing project files.
 
-If enabled, the configured lint command needs its own execution approval. A failed
+If enabled, the configured lint command needs its own execution authorization
+(explicit review or a matching command grant). A failed
 lint permits three reviewed corrective patches after the initial patch; the group
-becomes one commit when lint passes. Exhaustion or refusal leaves edits uncommitted.
+becomes one commit when lint passes if managed Git is enabled in a repository. Exhaustion or refusal leaves edits uncommitted.
 `/abandon` clears pending lint grouping without changing files. Pending grouping is
 in-memory, so resumed sessions treat remaining edits as existing work and review
-any checkpoint anew. Lint changes outside the pending target set are reported but
+any checkpoint anew when managed Git is enabled. Lint changes outside the pending target set are reported but
 are not silently included in the patch commit.
 
 Before writing, Skua saves private recovery records under `.skua/.tmp/patch-*.json`.
@@ -278,22 +355,24 @@ credential lookup or endpoint access; `/recover` offers it again. Successful
 application or complete restoration removes its record. Atomic file replacement
 and rechecks do not constitute a transaction with arbitrary external editors.
 
-Commands can receive a separate commit offer with a full diff. Ignored artifacts
+With managed Git enabled, commands can receive a separate commit offer with a full diff. Ignored artifacts
 are excluded. If the repository already had uncommitted work, attribution is
 conservatively considered ambiguous and no automatic commit offer is made. Review
 concurrent edits in the offered diff. Command commit offers do not automatically
 run the patch lint workflow.
 
-`/undo` reviews the latest consecutive Skua change. Checkpoints and intervening
-user commits stop traversal. Skua offers a remote fetch first; this requires
-approval. Remote-tracking evidence of publication uses a new reversing commit.
-Otherwise publication remains unknown, even after a successful fetch:
+With managed Git enabled, `/undo` reviews the latest consecutive Skua change.
+Checkpoints and intervening user commits stop traversal. Strategy selection never
+fetches, inspects remote-tracking refs, or infers whether a change was published:
 
-- `/undo local` explicitly confirms the tip was never shared, and requests removal
-  of that change and its file effects while preserving unrelated work.
-- `/undo revert` explicitly chooses a reversing commit and preserves history.
+- `/undo` and `/undo revert` create a new reversing commit, preserving history.
+- `/undo local` explicitly requests removal of an eligible current tip and its
+  file effects, moving HEAD to its parent (or an unborn branch for a root commit).
+  It preserves unrelated work and never switches strategy based on remote refs.
 
-Both still require review. Declining fetch does not authorize either strategy.
+Both strategies show the selected effects and inverse diff for approval. A local
+rewrite requires the target at the current tip; use a reversing commit for earlier
+changes in a reversal chain. Reversing commits also show the exact commit message.
 Repeated reversals skip already-undone changes rather than undoing the reversal.
 Dirty targets, merge changes, or changes outside the selected project root stop
 undo. Failed undo commits keep inverse edits for inspection. No push or force-push

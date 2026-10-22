@@ -229,12 +229,6 @@ class Repo:
                 return commit
         return None
 
-    def published(self, commit):
-        return bool(self.run('for-each-ref', '--format=%(refname)', '--contains=' + commit, 'refs/remotes/').stdout)
-
-    def fetch(self):
-        return self.run('fetch', '--all', check=False, timeout=300).returncode == 0
-
     def undo_files(self, commit):
         parents = self.run('rev-list', '--parents', '-n', '1', commit).stdout.decode().split()[1:]
         if len(parents) > 1:

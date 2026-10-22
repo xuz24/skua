@@ -57,6 +57,7 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
         system = [SYSTEM_MESSAGE]
         if runtime:
             system = [{'role': 'system', 'content': SYSTEM_MESSAGE['content'] +
+                       '\nManaged Git: ' + ('enabled' if runtime.config.managed_git else 'disabled; leave edits uncommitted') +
                        '\nDefault notes directory: ' + str(runtime.config.notes_directory)}]
             snapshot = await asyncio.to_thread(Instructions.load, runtime.config)
             previous = runtime.instructions or Instructions()
@@ -115,12 +116,10 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                 dispatched += 1  # Invalid and denied calls consume a slot too.
                 problem = validate(call.name, call.arguments)
                 if problem:
-                    result = Result('error', problem, code='invalid_arguments')
                     corrections += 1
-                else:
-                    executing = True
-                    result = await runtime.execute(session, seq, call.name, call.arguments)
-                    executing = False
+                executing = True
+                result = await runtime.execute(session, seq, call.name, call.arguments)
+                executing = False
                 result.record(session, seq)
                 pending.pop(0)
                 if result.status == 'cancelled' or asyncio.current_task().cancelling():

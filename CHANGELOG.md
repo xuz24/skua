@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- M3: explicit session-only patch-directory and exact-command grants, inspection,
+  and revocation through `/permissions`; per-operation review stays the default.
+- Approval history distinguishes session grants from explicit reviews. Existing v1
+  sessions still load; active grants are never restored from saved history.
+
+- M2: `git.managed = false` leaves reviewed edits uncommitted, preserves staging,
+  and skips Git initialization, checkpoints, and commit offers; lint stays separate.
+- `/undo` now defaults to a reversing commit. `/undo local` explicitly rewrites an
+  eligible tip. Undo no longer fetches or inspects remote publication status.
+
+- M1: refreshing tool activity with elapsed time, separate model/approval waiting,
+  concise completion statuses, and Ctrl-C cleanup across commands and diff reviews.
+- Preserve streamed replies across activity changes and retain successful lint
+  output for `/output` alongside failed lint and command output.
+
 ## 1.0.0 — 2026-10-21
 
 First local v1 release of Skua.

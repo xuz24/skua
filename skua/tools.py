@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import stat
 
+from .activity import Activity
 from .config import ConfigError
 from .discovery import discover
 from .environment import prepare_command
@@ -24,7 +25,7 @@ def schema(name, description, properties, required):
 PATH = {'type': 'string', 'description': 'Absolute or project-relative path.'}
 CATALOG = [
     schema('apply_patch', 'Create, replace, delete or rename UTF-8 text files after full diff review. '
-           'Git-backed patches include a separate existing-work checkpoint when needed and one managed commit after approved lint. '
+           'When git.managed is enabled, Git-backed patches include an existing-work checkpoint when needed and a reviewed commit after configured lint. Otherwise edits remain uncommitted. '
            'For notes use the configured notes directory unless the user chooses another path.',
            {'message': {'type': 'string'}, 'changes': {'type': 'array', 'minItems': 1, 'maxItems': 100,
             'items': {'type': 'object', 'properties': {'op': {'type': 'string', 'enum': ['write', 'delete', 'rename']},
@@ -126,11 +127,13 @@ def file_snapshot(root):
 
 
 class Runtime:
-    def __init__(self, config, *, approve=deny_review, continue_block=None, on_notice=lambda _: None):
+    def __init__(self, config, *, approve=deny_review, continue_block=None, on_notice=lambda _: None, on_activity=lambda _: None):
         self.config = config
         self.approve = approve
         self.continue_block = continue_block
         self.on_notice = on_notice
+        self.on_activity = on_activity
+        self.activity = None
         self.instructions = None
         from .workflows import Workflows
         self.workflows = Workflows(self)
@@ -138,15 +141,26 @@ class Runtime:
     async def review(self, session, call_seq, review):
         if len(json.dumps(review.summary, ensure_ascii=False).encode('utf-8')) > 14_000_000:
             raise AccessError('Review exceeds the session record budget; split the change into smaller patches.')
-        try:
-            decision = await self.approve(review)
-            if decision not in {'approved', 'denied', 'cancelled'}:
-                decision = 'denied'
-        except (asyncio.CancelledError, EOFError):
-            decision = 'cancelled'
+        grant = session.permissions.match(self.config, review)
+        if grant is not None:
+            decision = 'approved'
+            self.on_notice(f'Session grant {grant.id}: {review.action} authorized.')
+        else:
+            previous = self.activity
+            self.on_activity(Activity('approval', review.action, call_seq))
+            try:
+                decision = await self.approve(review)
+                if decision not in {'approved', 'denied', 'cancelled'}:
+                    decision = 'denied'
+            except (asyncio.CancelledError, EOFError):
+                decision = 'cancelled'
+            finally:
+                self.on_activity(previous)
         session._append('approval', turn=session.active_turn, call_seq=call_seq,
                         action=review.action, decision=decision, reasons=list(review.reasons),
-                        targets=list(review.targets), summary=review.summary, review_sha256=review.review_sha256)
+                        targets=list(review.targets), summary=review.summary, review_sha256=review.review_sha256,
+                        authorization={'source': 'session_grant', 'grant_id': grant.id} if grant else
+                                      {'source': 'review', 'grant_id': None})
         return decision
 
     async def authorize(self, session, call_seq, targets, *, contents):
@@ -169,6 +183,29 @@ class Runtime:
         return None
 
     async def execute(self, session, call_seq, name, args):
+        activity = Activity('tool', name, call_seq)
+        self.activity = activity
+        self.on_activity(activity)
+        result = None
+        status = 'error'
+        try:
+            result = await self._execute(session, call_seq, name, args)
+            status = result.status
+            return result
+        except asyncio.CancelledError:
+            status = 'cancelled'
+            raise
+        finally:
+            summary = ''
+            if result:
+                if result.data and 'returncode' in result.data:
+                    summary = f"exit code {result.data['returncode']}"
+                if result.output:
+                    summary += f' · /output {call_seq}'
+            self.activity = None
+            self.on_activity(replace(activity, status=status, summary=summary.strip(' ·')))
+
+    async def _execute(self, session, call_seq, name, args):
         error = validate(name, args)
         if error:
             return Result('error', error, code='invalid_arguments')
@@ -276,7 +313,8 @@ class Runtime:
         if hidden:
             summary += '\nDot paths: ' + ', '.join(hidden)
         review = Review.create('command', sorted(reasons), sorted(set(targets)), summary,
-                               [invocation.argv, evidence])
+                               [invocation.argv, evidence], policy_paths=[p for p, _ in evidence],
+                               command=command, invocation=invocation)
         decision = await self.review(session, call_seq, review)
         if decision != 'approved':
             return Result(decision, 'Command ' + decision + '. Do not retry it.')
