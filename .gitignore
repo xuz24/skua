@@ -1,15 +1,28 @@
+# Local environment and credentials
 .env
 .env.*
 !.env.example
 .venv/
+
+# Python caches and test artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Package builds
 *.egg-info/
 build/
 dist/
+
+# Local Skua history, locks, recovery snapshots, and wheel caches
 .skua/sessions/
 .skua/locks/
 .skua/.tmp/
 
-.docs
+# Local planning documents and macOS metadata
+/.docs/
+.DS_Store

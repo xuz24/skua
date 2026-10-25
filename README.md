@@ -536,3 +536,43 @@ and both streaming modes using mocked endpoints. GitHub Actions is configured fo
 Ubuntu/macOS and Python 3.12–3.14; those remote jobs have not been verified in this
 session. See [VALIDATION.md](VALIDATION.md) for evidence, reproduction commands,
 coverage limits, and explicitly opt-in live checks.
+
+
+### Compare interactive modes offline
+
+Run `python scripts/interactive_acceptance.py` from this checkout to compare the
+same edit → failed lint → corrective edit workflow with network access blocked.
+It uses temporary projects and mocked responses, preserving unrelated staged and
+unstaged files. The fresh-install checker also runs this comparison for each
+available Bash/Zsh and streaming/nonstreaming combination.
+
+| Selected mode | Operation reviews | Grant confirmations | Total authorization prompts | Commits | Transcript saves |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Default: managed Git, per-operation review, automatic compaction off | 5 | 0 | 5 | 1 reviewed | 0 |
+| Smoother: unmanaged Git, scoped patch + exact lint-command grants, automatic compaction on | 0 | 2 | 2 | 0 | 0 |
+
+The five default reviews cover two patches, two lint commands, and the final
+commit. The smoother count includes both initial grant confirmations; subsequent
+matching operations reuse those grants. Both modes also ask whether to save or
+discard on exit; that common exit prompt is excluded from authorization counts.
+These counts describe this fixture, not every task. Sensitive/external targets,
+Git actions, and recovery still require their own reviews. Grants expire with
+the session, and exact-command authorization does not sandbox the shell.
+
+The fixture seeds five earlier turns and uses a deliberately tiny 100-token
+estimated budget to exercise automatic compaction once in smoother mode. This
+is a test trigger, not a recommended budget or a model limit. Real usage requires
+an explicit budget suited to your model; see the context configuration above.
+
+For a hands-on display check, run both commands in a terminal and follow their
+printed instructions:
+
+```sh
+python scripts/interactive_acceptance.py --interactive
+python scripts/interactive_acceptance.py --interactive --smoother
+```
+
+Approve the fixture reviews, inspect the incremental response text, diff display,
+and elapsed lint progress, then enter `/context` and `/exit`, choosing `discard`.
+The script verifies final content, authorization counts, Git state, compaction,
+and absence of transcript saves. It does not measure real-provider behavior.

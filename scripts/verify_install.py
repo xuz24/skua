@@ -41,11 +41,14 @@ def main():
         # Copy the smoke script so neither its import path nor cwd is the checkout.
         smoke = base / 'installed_smoke.py'
         shutil.copyfile(repo / 'scripts/installed_smoke.py', smoke)
+        acceptance = base / 'interactive_acceptance.py'
+        shutil.copyfile(repo / 'scripts/interactive_acceptance.py', acceptance)
         for shell in ('/bin/bash', '/bin/zsh'):
             if not Path(shell).exists():
                 continue
             for mode in ([], ['--nonstreaming']):
                 run([python, smoke, '--shell', shell, *mode], cwd=base)
+                run([python, acceptance, '--shell', shell, *mode], cwd=base)
         print('Fresh pinned installation and all available shell/streaming combinations passed.')
 
 

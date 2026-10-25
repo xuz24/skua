@@ -1,6 +1,79 @@
 # Validation and release evidence
 
+## Next-version M5 — interactive acceptance complete
+
+Local validation on 2026-10-25, macOS arm64 / Python 3.12.8:
+**375 tests passed** with `.venv/bin/python -m pytest -q`. The four new comparison
+cases also passed after adding rendered-progress/output-link assertions.
+Fresh offline installation passed with pinned dependencies, `pip check`, both
+entry points, and the old and new mocked acceptance workflows under
+Bash/Zsh × streaming/nonstreaming. `git diff --check` passed.
+
+Reproduce with:
+
+```sh
+.venv/bin/python scripts/interactive_acceptance.py
+.venv/bin/python -m pytest -q
+.venv/bin/python scripts/verify_install.py --wheelhouse .skua/.tmp/milestone1-wheels
+```
+
+`tests/test_interactive_acceptance.py` runs the same edit → failed lint → fix
+through the terminal conversation and actual ChatClient with mocked HTTP. Real
+socket connections are blocked. Streaming replies arrive in delayed text deltas;
+the lint command runs long enough to render elapsed progress. The scenario seeds
+five old turns and verifies that automatic compaction occurs exactly once in
+smoother mode, without deleting canonical history. A fixture-only 100-token budget
+forces that trigger; it is not a recommended model budget.
+
+| Configuration | Operation reviews | Initial grant confirmations | Total authorization prompts | Commits | Transcript saves |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Managed Git; per-operation review; auto-compaction off | 5 | 0 | 5 | 1 reviewed | 0 |
+| Unmanaged Git; patch-directory and exact lint-command grants; auto-compaction on | 0 | 2 | 2 | 0 | 0 |
+
+The default reviews are patch, lint, corrective patch, lint, and commit. Counts
+include smoother-mode grant setup; the common save/discard exit prompt is excluded.
+Both scenarios assert final content, failed/successful tool outcomes, retained
+output links, cleared activity, serializable history, and preservation of unrelated
+staged and unstaged files. Neither scenario requests a save. These are measured
+fixture results, not a general guarantee of prompt reduction for every task.
+
+The passing regression suite also covers the M5 interruption/recovery checks:
+
+- Model response: `test_session.py::test_cancel_ends_turn_and_keeps_partial_text`
+  and client stream cancellation/cleanup in `test_client.py`.
+- Approval: Ctrl-C on short/full review in `test_activity.py` and undispatched
+  calls marked not-run in `test_tools.py`.
+- Command execution: real SIGINT, timeout, repeated cancellation, child cleanup,
+  retained output, and granted-command cancellation in activity/execution/permission tests.
+- Compaction: manual SIGINT and automatic cancellation preserve prior context and
+  clear activity in `test_context.py`.
+- Partial patch recovery: restoration on injected write failure in `test_patches.py`
+  and `test_managed_git.py`; recovery remains explicitly reviewed in both Git modes.
+
+**Manual M5 gate passed (user-reported, 2026-10-25):** the user ran both
+walkthroughs below and confirmed “both ran correctly and everything was readable.”
+This confirms the requested streaming, diff-review, and lint-progress readability
+check in both modes. No blocking interactive defect was reported. Together with
+the automated and fresh-install checks, this completes M5. M6 has not started.
+
+```sh
+.venv/bin/python scripts/interactive_acceptance.py --interactive
+.venv/bin/python scripts/interactive_acceptance.py --interactive --smoother
+```
+
+Follow the printed commands, approve the fixture reviews, then choose `discard`
+at exit. Each walkthrough uses an isolated temporary project and mocked provider.
+No live-provider acceptance or remote CI run of these M5 additions was inspected.
+The previously reported passing CI rerun below predates these additions.
+
 ## macOS CI cleanup regression — 2026-10-25
+
+After pushing the fix, the user confirmed that all CI rerun jobs passed, including
+the previously failing macOS jobs. The regression is resolved in the reported
+rerun. This is user-reported remote validation; run URLs and commit IDs were not
+provided or independently inspected. Earlier checkpoint limitations below remain
+historical; manual M5 acceptance has since passed as recorded above. Live-provider
+acceptance remains outstanding.
 
 Local verification: **371 passed** on Python 3.12.8; **46 activity/execution tests
 passed** on Python 3.13.7. The 3.13 run used the existing pinned dependency directory
@@ -23,8 +96,8 @@ or probe. It continues signalling groups (including surviving descendants), and
 persistent permission errors or other errors remain errors. Regression tests cover
 TERM/probe/KILL retries, bounded real permission errors, real macOS zombie/reaping,
 and retained output/activity status through timeout and cancellation. CI assertions
-now include result details on failure. A remote rerun is still required to confirm
-these particular workflow failures are resolved.
+now include result details on failure. The user subsequently reported that all
+remote rerun jobs passed.
 
 ## Next-version M4 — automatic context management
 
