@@ -1,5 +1,46 @@
 # Validation and release evidence
 
+## macOS CI cleanup regression — 2026-10-25
+
+Local verification: **371 passed** on Python 3.12.8; **46 activity/execution tests
+passed** on Python 3.13.7. The 3.13 run used the existing pinned dependency directory
+via `PYTHONPATH`, not a fresh 3.13 installation. `git diff --check` passed.
+
+User-provided CI logs report two failures on macOS/Python 3.12 (timeout and
+cancellation activity) and one on macOS/Python 3.13 (cancellation activity), against
+the 347-test checkpoint. These are actual failed remote runs, not an unverified
+matrix configuration. The logs do not include the underlying swallowed exception.
+
+A local subprocess reproduction confirms that macOS can raise `EPERM` from
+`killpg(pid, 0)` for an exited but unreaped group. Apple's
+[killpg1 implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c)
+excludes zombie group members and can return `EPERM` when none remain signalable.
+This is consistent with the reported statuses: cleanup previously propagated the
+exception into the generic tool-error handler, losing timeout/cancellation results.
+
+Cleanup now yields and retries Darwin `EPERM` for at most 250 ms per group signal
+or probe. It continues signalling groups (including surviving descendants), and
+persistent permission errors or other errors remain errors. Regression tests cover
+TERM/probe/KILL retries, bounded real permission errors, real macOS zombie/reaping,
+and retained output/activity status through timeout and cancellation. CI assertions
+now include result details on failure. A remote rerun is still required to confirm
+these particular workflow failures are resolved.
+
+## Next-version M4 — automatic context management
+
+Local validation on 2026-10-25: **362 tests passed** with
+`.venv/bin/python -m pytest -q`; `git diff --check` passed. Fresh offline wheel
+installation passed with cached dependencies, `pip check`, both entry points,
+and Bash/Zsh × streaming/nonstreaming mocked acceptance workflows.
+
+`tests/test_context.py` checks explicit budget/threshold validation, automatic
+triggering before model continuation and after a large tool result, retention of
+recent turns and complete tool groups, and one compaction attempt per turn.
+It covers malformed/oversized/non-shrinking summaries, timeouts, cancellation,
+manual `/compact` with automatic mode off, and save/resume without implicit saves.
+Provider usage and model limits remain unknown; the budget is an estimate target.
+No live-provider or remote-platform validation is claimed.
+
 ## Next-version M3 — scoped session permissions
 
 Local validation on 2026-10-21: **347 tests passed** with

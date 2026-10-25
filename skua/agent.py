@@ -2,6 +2,7 @@
 import asyncio
 
 from .client import ChatClient, ModelError
+from .context import compact, estimate
 from .instructions import Instructions
 from .permissions import AccessError
 from .session import Session
@@ -39,6 +40,7 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
     stopped = False
     executing = False
     working = False
+    compaction_attempted = False
     def set_working(active):
         nonlocal working
         if working != active:
@@ -72,6 +74,27 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
         else:
             system = [{'role': 'system', 'content': 'You are Skua. Tools are unavailable; answer using supplied text only.'}]
         while True:
+            if runtime and runtime.config.context.auto_compact and not compaction_attempted:
+                policy = runtime.config.context
+                size = estimate([*system, *session.active_messages()], CATALOG if not stopped else ())
+                if size * 100 >= policy.budget_tokens * policy.threshold_percent:
+                    compaction_attempted = True
+                    on_notice(f'Automatic compaction: ~{size:,} tokens estimated; '
+                              f'configured budget {policy.budget_tokens:,}.')
+                    try:
+                        await compact(session, client, allow_active=True, on_activity=runtime.on_activity)
+                    except asyncio.CancelledError:
+                        on_notice('Automatic compaction cancelled; active context unchanged.')
+                        raise
+                    except (ModelError, ValueError, TimeoutError) as exc:
+                        on_notice(f'Automatic compaction skipped or failed: {exc}. '
+                                  'Active context unchanged; no more attempts this turn.')
+                    else:
+                        remaining = estimate([*system, *session.active_messages()], CATALOG if not stopped else ())
+                        on_notice(f'Context compacted: ~{remaining:,} tokens estimated. Full history preserved.')
+                        if remaining * 100 >= policy.budget_tokens * policy.threshold_percent:
+                            on_notice('Context remains above the configured threshold; '
+                                      'recent turns and instructions are retained. No more attempts this turn.')
             partial.clear()
             kwargs = {'on_text': delta, 'on_retry': retry}
             if runtime and not stopped:

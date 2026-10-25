@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 from dataclasses import dataclass
 import os
 import signal
+import sys
 import time
 from typing import Mapping
 
@@ -83,15 +85,29 @@ def _signal_group(pid: int, sig: int) -> bool:
         return False
 
 
+async def _signal_group_after_reaping(pid: int, sig: int) -> bool:
+    # Darwin can return EPERM for an exited, unreaped process group. Yield to
+    # asyncio's child watcher and retry the *group*, not just the leader: live
+    # descendants still need signalling. Never suppress persistent permission errors.
+    deadline = time.monotonic() + 0.25
+    while True:
+        try:
+            return _signal_group(pid, sig)
+        except PermissionError as exc:
+            if sys.platform != 'darwin' or exc.errno != errno.EPERM or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(0.01)
+
+
 async def _stop(proc: asyncio.subprocess.Process, grace: float) -> None:
-    if not _signal_group(proc.pid, signal.SIGTERM):
+    if not await _signal_group_after_reaping(proc.pid, signal.SIGTERM):
         return
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
-        if not _signal_group(proc.pid, 0):
+        if not await _signal_group_after_reaping(proc.pid, 0):
             return
         await asyncio.sleep(min(0.05, max(0, deadline - time.monotonic())))
-    _signal_group(proc.pid, signal.SIGKILL)
+    await _signal_group_after_reaping(proc.pid, signal.SIGKILL)
 
 
 async def _finish_despite_cancellation(task):

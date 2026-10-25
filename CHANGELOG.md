@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Retry transient macOS process-group `EPERM` during timeout/cancellation cleanup
+  while the child is being reaped. Persistent permission errors still surface.
+
+- M4: opt-in automatic context compaction with an explicit estimated budget and
+  percentage threshold. Manual and automatic compaction share cancellation,
+  timeout, summary validation, and history-preserving behavior.
+
 - M3: explicit session-only patch-directory and exact-command grants, inspection,
   and revocation through `/permissions`; per-operation review stays the default.
 - Approval history distinguishes session grants from explicit reviews. Existing v1

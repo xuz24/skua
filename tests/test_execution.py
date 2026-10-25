@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 import os
+import signal
 from pathlib import Path
 import shlex
 import sys
@@ -244,3 +245,80 @@ def test_preview_counts_retained_and_discarded_bytes():
     assert preview.head == b'ab' and preview.tail == b'st'
     assert retained.omitted_bytes == 10
     assert preview.omitted_bytes == 16
+
+
+@pytest.mark.parametrize('sig', [signal.SIGTERM, 0, signal.SIGKILL])
+def test_darwin_group_signal_retries_until_reaped(monkeypatch, sig):
+    import errno
+    from skua import execution
+    monkeypatch.setattr(execution.sys, 'platform', 'darwin')
+    attempts = []
+    async def scenario():
+        reaped = False
+        def signal_group(pid, requested):
+            attempts.append((pid, requested))
+            if not reaped:
+                raise PermissionError(errno.EPERM, 'unreaped group')
+            return False
+        async def reap():
+            nonlocal reaped
+            await asyncio.sleep(.005)
+            reaped = True
+        monkeypatch.setattr(execution, '_signal_group', signal_group)
+        reaper = asyncio.create_task(reap())
+        assert not await execution._signal_group_after_reaping(123, sig)
+        await reaper
+    asyncio.run(scenario())
+    assert len(attempts) >= 2 and set(attempts) == {(123, sig)}
+
+
+@pytest.mark.parametrize('platform,error', [('darwin', 1), ('linux', 1), ('darwin', 13)])
+def test_group_signal_preserves_real_permission_errors(monkeypatch, platform, error):
+    from skua import execution
+    monkeypatch.setattr(execution.sys, 'platform', platform)
+    attempts = []
+    def denied(pid, sig):
+        attempts.append(sig)
+        raise PermissionError(error, 'denied')
+    monkeypatch.setattr(execution, '_signal_group', denied)
+    async def scenario():
+        with pytest.raises(PermissionError) as caught:
+            await asyncio.wait_for(execution._signal_group_after_reaping(123, 0), 1)
+        assert caught.value.errno == error
+    asyncio.run(scenario())
+    if platform == 'darwin' and error == 1:
+        assert len(attempts) > 1
+    else:
+        assert len(attempts) == 1
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Darwin unreaped process-group regression')
+def test_real_darwin_unreaped_group_cleanup():
+    import subprocess
+    import time
+    from skua.execution import _signal_group_after_reaping
+    # Unlike asyncio's subprocess watcher, Popen leaves reaping under test control.
+    proc = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)
+    async def scenario():
+        os.killpg(proc.pid, signal.SIGTERM)
+        # Wait until the kernel exposes the zombie state, without calling poll/wait.
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                os.killpg(proc.pid, 0)
+            except PermissionError:
+                break
+            assert time.monotonic() < deadline
+            await asyncio.sleep(.01)
+        async def reap():
+            await asyncio.sleep(.02)
+            await asyncio.to_thread(proc.wait)
+        reaper = asyncio.create_task(reap())
+        assert not await _signal_group_after_reaping(proc.pid, 0)
+        await reaper
+    try:
+        asyncio.run(scenario())
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()

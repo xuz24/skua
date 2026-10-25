@@ -34,7 +34,7 @@ def test_tool_activity_lifecycle(workspace, decision, command, expected):
         terminal.show_activity(event)
     runtime = Runtime(config(workspace, commands={'timeout_seconds': 1}), approve=approve, on_activity=activity)
     result = asyncio.run(runtime.execute(state(workspace), 3, 'run_command', {'command': command}))
-    assert result.status == expected
+    assert result.status == expected, result
     assert [e.phase for e in events] == ['tool', 'approval', 'tool', 'tool']
     assert events[0] == events[2]
     assert events[-1].status == expected
@@ -94,7 +94,7 @@ def test_slow_command_refreshes_and_sigint_cleans_up(workspace):
             await asyncio.wait_for(task, 8)
         assert signal.getsignal(signal.SIGINT) == old
         assert terminal.status is None and terminal.activity is None
-        assert events[-1].status == 'cancelled'
+        assert events[-1].status == 'cancelled', results(session)
         assert results(session)[0]['output']['retained_bytes'] == 7
         assert 'cancelled' in target.getvalue()
     asyncio.run(scenario())
@@ -176,3 +176,38 @@ def test_model_wait_restores_tool_and_approval_elapsed(monkeypatch):
     assert '2.5s' in terminal._toolbar()
     assert terminal.status is None
     terminal.show_activity(None)
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+def test_darwin_cleanup_race_keeps_tool_outcome_and_output(workspace, monkeypatch, cancel):
+    import errno
+    from skua import execution
+    monkeypatch.setattr(execution.sys, 'platform', 'darwin')
+    original = execution._signal_group
+    pending = {signal.SIGTERM, 0}
+    def race(pid, sig):
+        if sig in pending:
+            pending.remove(sig)
+            raise PermissionError(errno.EPERM, 'unreaped group')
+        return original(pid, sig)
+    monkeypatch.setattr(execution, '_signal_group', race)
+    async def scenario():
+        async def yes(review):
+            return 'approved'
+        terminal = Terminal(output=DummyOutput(), console=Console(file=StringIO()))
+        runtime = Runtime(config(workspace, commands={'timeout_seconds': 1}),
+                          approve=yes, on_activity=terminal.show_activity)
+        task = asyncio.create_task(runtime.execute(state(workspace), 3, 'run_command',
+                                  {'command': 'printf started; touch started; sleep 30'}))
+        if cancel:
+            for _ in range(300):
+                if (workspace / 'started').exists():
+                    break
+                await asyncio.sleep(.01)
+            assert (workspace / 'started').exists()
+            task.cancel()
+        result = await asyncio.wait_for(task, 8)
+        assert result.status == ('cancelled' if cancel else 'timeout'), result
+        assert result.output['retained_bytes'] == 7
+        assert terminal.activity is None and terminal.status is None
+    asyncio.run(scenario())

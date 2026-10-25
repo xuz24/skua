@@ -120,13 +120,15 @@ class Session:
         """Reduced model context, while canonical events remain complete."""
         if not self.compaction:
             return self.messages()
-        return [{'role': 'system', 'content': 'Summary of earlier conversation (user-approved compaction):\n'
+        return [{'role': 'system', 'content': 'Summary of earlier conversation (compacted context):\n'
                  + self.compaction['summary']}, *self.messages(after_seq=self.compaction['through_seq'])]
 
-    def compaction_input(self, keep_turns: int = 2):
+    def compaction_input(self, keep_turns: int = 2, *, allow_active=False):
         """Return messages and complete event boundary for a useful old prefix."""
         if self.active_turn is not None:
-            raise ValueError('cannot compact during a turn')
+            if not allow_active:
+                raise ValueError('cannot compact during a turn')
+            keep_turns += 1  # Keep the active turn plus two recent completed turns intact.
         users = [e for e in self.events if e['type'] == 'message' and e['role'] == 'user']
         if len(users) <= keep_turns:
             raise ValueError('There is not enough older conversation to compact.')

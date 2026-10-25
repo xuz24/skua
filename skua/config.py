@@ -34,6 +34,7 @@ SCHEMA = {
     "commands": {"timeout_seconds": "positive", "dotenv_allowlist": "variables"},
     "output": {"model_max_bytes": "positive", "retain_max_bytes": "positive"},
     "agent": {"tool_calls_per_block": "positive"},
+    "context": {"budget_tokens": "positive", "auto_compact": "bool", "threshold_percent": "percent"},
     "notes": {"directory": "path"}, "sessions": {"directory": "path"},
     "lint": {"enabled": "bool", "command": "text"},
     "git": {"managed": "bool"},
@@ -47,6 +48,7 @@ DEFAULTS: dict[str, Any] = {
     "commands": {"timeout_seconds": 300, "dotenv_allowlist": []},
     "output": {"model_max_bytes": 20_000, "retain_max_bytes": 1_000_000},
     "agent": {"tool_calls_per_block": 20},
+    "context": {"auto_compact": False, "threshold_percent": 80},
     "notes": {"directory": ".notes"}, "sessions": {"directory": ".skua/sessions"},
     "lint": {"enabled": False}, "sensitive": {"filenames": [], "patterns": []},
     "ui": {"startup_animation": "once"},
@@ -101,6 +103,13 @@ class Lint:
 
 
 @dataclass(frozen=True)
+class Context:
+    budget_tokens: int | None
+    auto_compact: bool
+    threshold_percent: int
+
+
+@dataclass(frozen=True)
 class Sensitive:
     filenames: tuple[str, ...]
     patterns: tuple[str, ...]
@@ -123,6 +132,7 @@ class Config:
     sensitive: Sensitive
     startup_animation: str
     managed_git: bool
+    context: Context
     # These contain configuration only, never resolved credential values.
     sources: Mapping[str, str] = field(repr=False)
     raw: Mapping[str, Any] = field(repr=False)
@@ -188,6 +198,8 @@ def _validate_leaf(value: Any, rule: str, source: str, path: str) -> None:
         expectation = "expected once, always, or never"
     elif rule == "version":
         valid, expectation = type(value) is int and value == 1, "expected schema_version = 1"
+    elif rule == "percent":
+        valid, expectation = type(value) is int and 1 <= value <= 100, "expected an integer from 1 to 100"
     elif rule == "positive":
         valid, expectation = type(value) is int and value > 0, "expected a positive integer"
     elif rule in {"text", "path"}:
@@ -335,6 +347,8 @@ def build_config(root: Path, layers: list[tuple[str, dict[str, Any]]],
         fail("output.retain_max_bytes", "must be at least output.model_max_bytes")
     if raw["lint"]["enabled"] and "command" not in raw["lint"]:
         fail("lint.command", "required when lint is enabled")
+    if raw["context"]["auto_compact"] and "budget_tokens" not in raw["context"]:
+        fail("context.budget_tokens", "required when automatic compaction is enabled")
     env = raw["environment"]
     if env["kind"] == "venv" and "path" not in env:
         fail("environment.path", "required for venv")
@@ -363,6 +377,8 @@ def build_config(root: Path, layers: list[tuple[str, dict[str, Any]]],
         sensitive=Sensitive(tuple(raw["sensitive"]["filenames"]), tuple(raw["sensitive"]["patterns"])),
         startup_animation=raw["ui"]["startup_animation"],
         managed_git=raw["git"]["managed"],
+        context=Context(raw["context"].get("budget_tokens"), raw["context"]["auto_compact"],
+                        raw["context"]["threshold_percent"]),
         sources=sources, raw=raw,
     )
 

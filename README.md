@@ -151,10 +151,42 @@ attach file contents. `/context` shows an approximate token estimate based on
 serialized character count; compatible endpoints may use different tokenization
 and Skua does not assume a provider context limit. `/compact` asks the model to
 summarize older complete turns while keeping the latest two turns in active
-context. Compaction is manual, cancellable, and never removes canonical history.
+context. Compaction is cancellable and never removes canonical history. Automatic
+compaction is off by default.
 `/help`, `/new`, and `/exit` are available. New/exit/session switching with unsaved
 history offers Save / Discard / Cancel. Nothing writes transcripts, notes, or
 terminal history files automatically.
+
+To opt in, set an explicit estimated budget in TOML (the value below is an example,
+not a detected model limit):
+
+```toml
+[context]
+budget_tokens = 32000
+auto_compact = true
+threshold_percent = 80
+```
+
+`budget_tokens` is a positive integer; enabling `auto_compact` requires it.
+`threshold_percent` is an integer from 1–100 (default 80). `/context` shows these
+settings separately from the character-based estimate; provider usage and the
+model's actual limit remain unknown. The budget is a target, not a hard request
+limit or an output-token allowance. Configure these fields in TOML; setup does not
+prompt for them yet.
+
+Before a model continuation, automatic mode compares the estimated request,
+including instructions and tools, with the threshold. It attempts compaction at
+most once per user turn, retaining two completed turns and the entire active turn.
+`/compact` retains the two most recent completed turns. Both preserve tool-call/result
+groups, full history, and existing save/resume behavior. Summary requests use the
+configured endpoint and can consume tokens; they have a 60-second timeout.
+
+Empty, tool-bearing, oversized, or non-shrinking summaries are rejected. Failure
+leaves context unchanged and automatic mode continues without another attempt that
+turn; Ctrl-C cancels the turn. Large retained turns/instructions may remain above
+the target, and the summary request itself may exceed that target. Skua reports
+this condition rather than repeatedly compacting or discarding recent work.
+Nothing is automatically saved. `/compact` remains available with automatic mode off.
 
 The startup animation plays on the first interactive launch for an installation.
 Set `[ui].startup_animation` to `"always"` to replay on every launch or `"never"`
