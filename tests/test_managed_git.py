@@ -144,3 +144,101 @@ def test_managed_git_config_default_override_and_validation(workspace):
     for value in ['false', 0, None]:
         with pytest.raises(ConfigError, match='git.managed'):
             config(workspace, git={'managed': value})
+
+
+@pytest.mark.parametrize('managed', [False, True])
+@pytest.mark.parametrize('location', ['nested', 'external'])
+def test_repository_boundary_is_only_a_managed_patch_restriction(workspace, managed, location):
+    root_repo = init(workspace)
+    other = (workspace if location == 'nested' else workspace.parent) / 'other-repo'
+    other.mkdir()
+    other_repo = init(other)
+    for root in [workspace, other]:
+        (root / 'a.txt').write_text('staged target\n')
+        (root / 'b.txt').write_text('staged unrelated\n')
+        git(root, 'add', 'a.txt', 'b.txt')
+        (root / 'b.txt').write_text('unstaged unrelated\n')
+    before = [repo.identity() for repo in [root_repo, other_repo]]
+    reviews = []
+    async def approve(review):
+        reviews.append(review)
+        return 'approved'
+    result, _ = turn(workspace, Runtime(config(workspace, git={'managed': managed}), approve=approve),
+                     edit(), edit(str(other / 'a.txt')))
+    assert result['status'] == ('error' if managed else 'ok')
+    if managed:
+        assert 'Split patches by repository' in result['model_text']
+    else:
+        assert any(r.action == 'patch' for r in reviews)
+        if location == 'external':
+            assert any('outside_root' in r.reasons for r in reviews)
+    for root in [workspace, other]:
+        assert (root / 'a.txt').read_text() == ('staged target\n' if managed else 'changed\n')
+        assert (root / 'b.txt').read_text() == 'unstaged unrelated\n'
+    assert [repo.identity() for repo in [root_repo, other_repo]] == before
+
+
+@pytest.mark.parametrize('replacement', ['file', 'symlink'])
+def test_unmanaged_nested_target_replacement_is_rejected(workspace, replacement):
+    init(workspace)
+    nested = workspace / 'nested'
+    nested.mkdir()
+    init(nested)
+    target = nested / 'a.txt'
+    async def approve(review):
+        if review.action == 'patch':
+            target.unlink()
+            if replacement == 'file':
+                target.write_text('concurrent work')
+            else:
+                target.symlink_to(workspace / 'a.txt')
+        return 'approved'
+    result, _ = turn(workspace, Runtime(config(workspace, git={'managed': False}), approve=approve),
+                     edit(str(target)))
+    assert result['status'] == 'error'
+    assert (workspace / 'a.txt').read_text() == 'original\n'
+    assert target.read_text() == ('concurrent work' if replacement == 'file' else 'original\n')
+
+
+def test_unmanaged_cross_repository_failure_restores_targets(workspace, monkeypatch):
+    init(workspace)
+    nested = workspace / 'nested'
+    nested.mkdir()
+    init(nested)
+    write = patches.write_file
+    def fail(path, *args, **kwargs):
+        if path == nested / 'a.txt' and args[0] == b'changed\n':
+            raise OSError('injected failure')
+        return write(path, *args, **kwargs)
+    monkeypatch.setattr(patches, 'write_file', fail)
+    result, _ = turn(workspace, Runtime(config(workspace, git={'managed': False}), approve=yes),
+                     edit(), edit(str(nested / 'a.txt')))
+    assert result['status'] == 'error'
+    assert (workspace / 'a.txt').read_text() == 'original\n'
+    assert (nested / 'a.txt').read_text() == 'original\n'
+
+
+def test_unmanaged_external_patch_still_requires_authorization(workspace):
+    init(workspace)
+    other = workspace.parent / 'external'
+    other.mkdir()
+    init(other)
+    result, _ = turn(workspace, Runtime(config(workspace, git={'managed': False})),
+                     edit(str(other / 'a.txt')))
+    assert result['status'] == 'denied'
+    assert (other / 'a.txt').read_text() == 'original\n'
+
+
+def test_unmanaged_lint_correction_can_cross_repository_boundaries(workspace):
+    init(workspace)
+    nested = workspace / 'nested'
+    nested.mkdir()
+    init(nested)
+    runtime = Runtime(config(workspace, git={'managed': False},
+                             lint={'enabled': True, 'command': 'grep fixed nested/a.txt'}), approve=yes)
+    result, _ = turn(workspace, runtime, edit())
+    assert result['status'] == 'error' and runtime.workflows.pending is not None
+    result, _ = turn(workspace, runtime, edit('nested/a.txt', 'fixed\n'))
+    assert result['status'] == 'ok' and runtime.workflows.pending is None
+    assert (workspace / 'a.txt').read_text() == 'changed\n'
+    assert (nested / 'a.txt').read_text() == 'fixed\n'

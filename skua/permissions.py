@@ -27,9 +27,11 @@ def lexical(root, value):
     return Path(os.path.abspath(root / Path(value).expanduser()))
 
 
-def sensitive(config, path):
+def sensitive(config, path, *, ignore_key_suffix=False):
     builtins = ('.env', '.env.*', '.netrc', '.npmrc', '.pypirc', '.git-credentials',
                 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', '*.key', '*.p12', '*.pfx')
+    if ignore_key_suffix:
+        builtins = tuple(rule for rule in builtins if rule != '*.key')
     for candidate in (path, path.resolve()):
         if any(fnmatchcase(part, rule) for part in candidate.parts for rule in builtins):
             return True

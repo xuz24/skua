@@ -1,8 +1,11 @@
 """Validated sequential read/command tools and per-operation authorization."""
 import asyncio
 import json
+import math
+import time
 from dataclasses import dataclass, replace
 import os
+import re
 from pathlib import Path
 import shlex
 import stat
@@ -14,6 +17,48 @@ from .environment import prepare_command
 from .execution import run_command, _finish_despite_cancellation
 from .permissions import AccessError, Review, Target, deny_review, lexical, sensitive
 from .patches import validate_changes
+
+
+def command_tokens(command):
+    """Heuristic path candidates, not a shell parser or security boundary.
+
+    Python heredoc bodies are stdin data. Scan their quoted literals for paths without
+    treating embedded-language punctuation (e.g. Python division) as shell words.
+    Unclosed/complex heredocs retain the conservative whole-command fallback.
+    """
+    lines = command.splitlines(keepends=True)
+    shell, literals = [], []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        shell.append(line)
+        index += 1
+        markers = re.findall(r"(?<!<)<<(-?)\s*(?:'([A-Za-z_][\w]*)'|\"([A-Za-z_][\w]*)\"|([A-Za-z_][\w]*))", line)
+        for tabs, single, double, bare in markers:
+            delimiter = single or double or bare
+            body = []
+            while index < len(lines):
+                candidate = lines[index].rstrip('\r\n')
+                index += 1
+                if (candidate.lstrip('\t') if tabs else candidate) == delimiter:
+                    break
+                body.append(candidate)
+            else:
+                shell, literals = [command], []
+                break
+            text = '\n'.join(body)
+            if re.search(r'(?:^|\s|[;&|])(?:[^\s]*/)?python(?:\d+(?:\.\d+)*)?\s', line):
+                literals.extend(a or b for a, b in re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", text))
+            else:
+                shell.append(text + '\n' + delimiter + '\n')
+        if shell == [command]:
+            break
+    try:
+        lexer = shlex.shlex(''.join(shell), posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer) + literals
+    except ValueError:
+        return [command]
 
 
 def schema(name, description, properties, required):
@@ -40,17 +85,39 @@ CATALOG = [
            'An explicit file bypasses ignore filtering. Sensitive contents require approval.',
            {'path': PATH, 'query': {'type': 'string', 'minLength': 1}}, ['path', 'query']),
     schema('run_command', 'Run a shell command after approval. May modify files; not a sandbox. '
+           'Optional timeout_seconds (alias timeout) is a positive number of seconds. '
+           'The effective limit is the smallest of the requested timeout, configured command ceiling, '
+           'and remaining unattended task time. Omit it to use the configured ceiling. '
+           'Output limits are configured in bytes, not per-call arguments. '
            'Retained output is inspectable without rerunning.',
-           {'command': {'type': 'string', 'minLength': 1}}, ['command']),
+           {'command': {'type': 'string', 'minLength': 1},
+            'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 1e12},
+            'timeout': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 1e12,
+                        'description': 'Alias for timeout_seconds; do not supply conflicting values.'}}, ['command']),
 ]
 
 
 def validate(name, arguments):
     definition = next((s['function']['parameters'] for s in CATALOG if s['function']['name'] == name), None)
-    if definition is None or not isinstance(arguments, dict):
-        return 'Unknown tool or invalid argument object.'
-    if set(arguments) - definition['properties'].keys() or set(definition['required']) - arguments.keys():
-        return 'Missing required arguments or unknown argument names.'
+    if definition is None:
+        return 'Tool did not execute: unknown tool. Use a tool from the supplied catalog.'
+    if not isinstance(arguments, dict):
+        return f'{name} did not execute: arguments must be a JSON object.'
+    unknown = set(arguments) - definition['properties'].keys()
+    missing = set(definition['required']) - arguments.keys()
+    if unknown or missing:
+        details = [f'{name} did not execute.']
+        if unknown:
+            details.append('Unsupported arguments: ' + ', '.join(sorted(map(str, unknown))) + '.')
+        if missing:
+            details.append('Missing required arguments: ' + ', '.join(sorted(missing)) + '.')
+        details.append('Supported arguments: ' + ', '.join(definition['properties']) + '.')
+        corrected = {key: value for key, value in arguments.items() if key in definition['properties']}
+        if not missing and validate(name, corrected) is None:
+            details.append('Retry with: ' + json.dumps(corrected, ensure_ascii=False))
+        else:
+            details.append('Supply the required fields with valid values and remove unsupported fields before retrying.')
+        return ' '.join(details)
     for key, value in arguments.items():
         rule = definition['properties'][key]
         if rule['type'] == 'array':
@@ -60,8 +127,14 @@ def validate(name, arguments):
         elif rule['type'] == 'string':
             if not isinstance(value, str) or not value or '\0' in value or len(value) > 100_000:
                 return f'{key} must be a nonempty string without NUL, at most 100000 characters.'
+        elif rule['type'] == 'number':
+            if type(value) not in (int, float) or not 0 < value <= 1e12 or not math.isfinite(value):
+                return f'{key} must be a finite positive number of seconds (at most 1e12), not a string or boolean.'
         elif type(value) is not int or not rule.get('minimum', 1) <= value <= rule.get('maximum', 1_000_000_000):
             return f'{key} is outside its integer bounds.'
+    if name == 'run_command' and 'timeout' in arguments and 'timeout_seconds' in arguments:
+        if arguments['timeout'] != arguments['timeout_seconds']:
+            return 'Supply timeout_seconds or timeout, or give both the same value.'
     return None
 
 
@@ -127,7 +200,9 @@ def file_snapshot(root):
 
 
 class Runtime:
-    def __init__(self, config, *, approve=deny_review, continue_block=None, on_notice=lambda _: None, on_activity=lambda _: None):
+    def __init__(self, config, *, approve=deny_review, continue_block=None, on_notice=lambda _: None, on_activity=lambda _: None, review_source='review', run_context=None):
+        self.run_context = run_context
+        self.review_source = review_source
         self.config = config
         self.approve = approve
         self.continue_block = continue_block
@@ -160,7 +235,7 @@ class Runtime:
                         action=review.action, decision=decision, reasons=list(review.reasons),
                         targets=list(review.targets), summary=review.summary, review_sha256=review.review_sha256,
                         authorization={'source': 'session_grant', 'grant_id': grant.id} if grant else
-                                      {'source': 'review', 'grant_id': None})
+                                      {'source': self.review_source, 'grant_id': None})
         return decision
 
     async def authorize(self, session, call_seq, targets, *, contents):
@@ -183,13 +258,18 @@ class Runtime:
         return None
 
     async def execute(self, session, call_seq, name, args):
-        activity = Activity('tool', name, call_seq)
+        activity = Activity('tool', name, call_seq, arguments=args if isinstance(args, dict) else None)
         self.activity = activity
         self.on_activity(activity)
         result = None
         status = 'error'
         try:
             result = await self._execute(session, call_seq, name, args)
+            if self.run_context:
+                budget = self.run_context.budget()
+                result = replace(result, data={**(result.data or {}), 'task_budget': budget},
+                                 text=result.text + f'\nTask time remaining: {budget["remaining_seconds"]:.3f}s. '
+                                 'The shared task deadline still applies.')
             status = result.status
             return result
         except asyncio.CancelledError:
@@ -200,20 +280,34 @@ class Runtime:
             if result:
                 if result.data and 'returncode' in result.data:
                     summary = f"exit code {result.data['returncode']}"
+                elif result.status != 'ok':
+                    summary = result.text.splitlines()[0][:240] if result.text else ''
+                elif result.data and 'count' in result.data:
+                    summary = f"{result.data['count']} files"
+                elif result.data and 'matches' in result.data:
+                    summary = f"{result.data['matches']} matches; {result.data['skipped_nontext_or_large']} files skipped"
+                elif name == 'apply_patch':
+                    summary = result.text.splitlines()[0][:240]
                 if result.output:
                     summary += f' · /output {call_seq}'
             self.activity = None
-            self.on_activity(replace(activity, status=status, summary=summary.strip(' ·')))
+            self.on_activity(replace(activity, status=status, summary=summary.strip(' ·'),
+                                     result_text=result.text if result else '',
+                                     output=result.output if result else None,
+                                     data=result.data if result else None))
 
     async def _execute(self, session, call_seq, name, args):
         error = validate(name, args)
         if error:
+            if 'did not execute' not in error:
+                error = f'{name} did not execute. {error}'
             return Result('error', error, code='invalid_arguments')
         try:
             if name == 'apply_patch':
                 return await self.workflows.patch(session, call_seq, args)
             if name == 'run_command':
-                return await self.command(session, call_seq, args['command'])
+                return await self.command(session, call_seq, args['command'],
+                                          args.get('timeout_seconds', args.get('timeout')))
             target = Target.inspect(lexical(self.config.root, args['path']))
             if name != 'search_files' or stat.S_ISDIR(target.identity[2]):
                 denied = await self.authorize(session, call_seq, [target], contents=name != 'list_files')
@@ -225,6 +319,8 @@ class Runtime:
                 start = args.get('start_line', 1)
                 stop = start - 1 + args.get('max_lines', 200)
                 selected = ''.join(f'{i + start}: {line}' for i, line in enumerate(lines[start-1:stop]))
+                if not selected:
+                    selected = 'File is empty.' if not lines else f'No lines at or after {start}; total lines: {len(lines)}.'
                 return Result('ok', bounded(selected, self.config.output.model_max_bytes),
                               {'path': str(target.resolved), 'total_lines': len(lines), 'start_line': start})
             if stat.S_ISDIR(target.identity[2]):
@@ -237,7 +333,7 @@ class Runtime:
             else:
                 paths = [target.path]
             if name == 'list_files':
-                return Result('ok', bounded('\n'.join(str(p) for p in paths), self.config.output.model_max_bytes),
+                return Result('ok', bounded('\n'.join(str(p) for p in paths) or 'No files found.', self.config.output.model_max_bytes),
                               {'count': len(paths)})
             targets = []
             skipped = 0
@@ -269,25 +365,28 @@ class Runtime:
                             break
                 if truncated:
                     break
-            return Result('ok', bounded('\n'.join(matches), self.config.output.model_max_bytes),
+            text = '\n'.join(matches) or 'No matches found.'
+            if skipped:
+                text += f'\nSkipped {skipped} nontext, oversized, or unreadable files.'
+            return Result('ok', bounded(text, self.config.output.model_max_bytes),
                           {'matches': len(matches), 'skipped_nontext_or_large': skipped, 'truncated': truncated})
         except (AccessError, ConfigError, OSError, RuntimeError):
-            return Result('error', 'Tool failed: path unavailable, changed since review, or unsupported. '
-                          'No contents returned.', code='access_error')
+            return Result('error', 'Tool could not complete: path or command environment is unavailable, '
+                          'changed since review, or unsupported. Inspect the target and configuration before retrying; '
+                          'any earlier changes may remain.', code='access_error')
 
-    async def command(self, session, call_seq, command):
+    async def command(self, session, call_seq, command, requested_timeout=None):
         config = self.config
+        ceiling = config.commands.timeout_seconds
+        if requested_timeout is not None:
+            ceiling = min(ceiling, requested_timeout)
+        config = replace(config, commands=replace(config.commands, timeout_seconds=ceiling))
         invocation = prepare_command(config, command)
         reasons = {'execute'}
         targets = []
         evidence = []
         hidden = []
-        try:
-            lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-            lexer.whitespace_split = True
-            tokens = list(lexer)
-        except ValueError:
-            tokens = [command]
+        tokens = command_tokens(command)
         for token in tokens:
             value = token.split('=', 1)[-1] if '=' in token else token
             path = lexical(config.root, value)
@@ -324,6 +423,18 @@ class Runtime:
         baseline = await self.workflows.command_before()
         if any(str(Path(p).resolve()) != r for p, r in evidence):
             raise AccessError('Command paths changed since review.')
+        budget = self.run_context.budget() if self.run_context else None
+        effective_timeout = ceiling
+        if self.run_context:
+            effective_timeout = min(ceiling, self.run_context.deadline - time.monotonic())
+            if effective_timeout <= 0:
+                return Result('timeout', 'Task deadline reached; command did not execute.',
+                              {'requested_timeout_seconds': requested_timeout, 'timeout_seconds': 0})
+        if budget:
+            budget.update(requested_timeout_seconds=requested_timeout,
+                          effective_command_ceiling_seconds=min(budget['remaining_seconds'], round(effective_timeout, 3)))
+            session.notice('command_budget', json.dumps({'call_seq': call_seq, **budget}))
+        config = replace(config, commands=replace(config.commands, timeout_seconds=effective_timeout))
         result = await run_command(config, command, _invocation=invocation)
         observation = asyncio.create_task(asyncio.to_thread(file_snapshot, config.root))
         try:
@@ -334,14 +445,9 @@ class Runtime:
         changes = [{'path': p, 'change': 'added' if p not in before else 'removed' if p not in after else 'modified'}
                    for p in sorted(before.keys() | after.keys()) if before.get(p) != after.get(p)]
         summary = '\n'.join(f'{x["change"]}: {x["path"]}' for x in changes[:200]) or 'No project metadata changes detected.'
-        summary += '\nChanges remain uncommitted. Metadata observation excludes .git and external paths; '
-        summary += 'it is not a complete audit or rollback.'
+        summary += '\nObservation covers project file metadata only; excludes .git and external paths.'
         if before_partial or after_partial or len(changes) > 200:
             summary += ' Change listing is incomplete.'
-        notice = '\n'.join(f'{x["change"]}: {x["path"]}' for x in changes[:200])
-        if before_partial or after_partial or len(changes) > 200:
-            notice += '\nChange listing is incomplete.'
-        self.on_notice((notice.strip() + '\n' if notice.strip() else '') + f'Output: /output {call_seq}')
         status = result.status if result.status != 'completed' else ('ok' if result.returncode == 0 else 'error')
         committed = None
         if status != 'cancelled' and not (before_partial or after_partial):
@@ -350,8 +456,23 @@ class Runtime:
             except (AccessError, OSError, UnicodeError) as exc:
                 self.on_notice('Command changes remain available; commit was not completed: ' +
                                (str(exc) if isinstance(exc, AccessError) else 'unsupported file or filesystem error'))
-        return Result(status, f'Command {status}; exit code {result.returncode}.\n{result.preview()}\n{summary}',
+        outcome = {'ok': 'Command succeeded', 'error': 'Command failed',
+                   'timeout': f'Command timed out (limit {config.commands.timeout_seconds:g}s)',
+                   'cancelled': 'Command cancelled'}.get(status, f'Command {status}')
+        if committed and committed.get('commit'):
+            summary += f'\nReviewed targets committed: {committed["commit"]}.'
+        elif changes:
+            summary += '\nSkua did not commit these changes.'
+        if status in {'timeout', 'cancelled'}:
+            summary += '\nThe command may have made partial changes; inspect them before retrying.'
+        return Result(status, f'{outcome}; exit code {result.returncode}; elapsed {result.duration_seconds:.2f}s.\n'
+                      f'{result.preview()}\n{summary}',
                       {'returncode': result.returncode, 'changes': changes[:200],
+                       'duration_seconds': round(result.duration_seconds, 3),
+                       'timeout_seconds': config.commands.timeout_seconds,
+                       'requested_timeout_seconds': requested_timeout,
+                       'configured_timeout_seconds': self.config.commands.timeout_seconds,
+                       **({'task_budget_at_dispatch': budget} if budget else {}),
                        'changes_incomplete': before_partial or after_partial or len(changes) > 200,
                        'commit': committed},
                       output_record(result, config), 'command_failed' if status == 'error' else None)

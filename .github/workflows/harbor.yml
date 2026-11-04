@@ -1,0 +1,48 @@
+name: Harbor integration smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harbor-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Prepare separate Skua and Harbor environments
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt
+          .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+          python -m venv .skua/.tmp/harbor-host
+          .skua/.tmp/harbor-host/bin/python -m pip install -r integrations/harbor/requirements.txt
+          .skua/.tmp/harbor-host/bin/python -m pip install --no-deps -e integrations/harbor
+      - name: Test pinned Harbor API and native runner
+        run: .skua/.tmp/harbor-host/bin/python -m pytest -q integrations/harbor/tests
+      - name: Build pinned Skua bundle
+        run: .venv/bin/python integrations/harbor/build_bundle.py --output .skua/.tmp/harbor-bundle
+      - name: Run real container trials and verifier
+        run: |
+          .skua/.tmp/harbor-host/bin/python integrations/harbor/smoke/run.py \
+            --bundle .skua/.tmp/harbor-bundle --output .skua/.tmp/harbor-smoke
+      - name: Retain synthetic trial artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: skua-harbor-smoke
+          path: |
+            .skua/.tmp/harbor-smoke/
+            .skua/.tmp/harbor-bundle/manifest.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

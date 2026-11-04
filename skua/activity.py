@@ -11,6 +11,10 @@ class Activity:
     started: float = field(default_factory=monotonic)
     status: str | None = None  # None while active; otherwise the tool outcome
     summary: str = ''
+    arguments: dict | None = None
+    result_text: str = ''
+    output: dict | None = None
+    data: dict | None = None
 
     @property
     def elapsed(self):

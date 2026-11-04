@@ -1,5 +1,6 @@
 import asyncio
 from io import StringIO
+import pytest
 
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
@@ -10,7 +11,8 @@ from skua.config import build_config
 from skua.terminal import Terminal, conversation
 
 
-def test_bracketed_paste_and_alt_enter_require_submission():
+@pytest.mark.parametrize('newline', ['\x1b[13;2u', '\x1b[27;2;13~', '\n'])
+def test_bracketed_paste_and_shift_enter_require_submission(newline):
     async def scenario():
         with create_pipe_input() as pipe:
             terminal = Terminal(input=pipe, output=DummyOutput())
@@ -23,8 +25,8 @@ def test_bracketed_paste_and_alt_enter_require_submission():
             assert terminal.prompt.message == '❯ '
             assert terminal.prompt.layout.current_window.style() == 'class:input-field'
             height = terminal.prompt.layout.current_window.preferred_height(80, 40)
-            assert height.min == height.max == 1
-            pipe.send_text('\x1b\rthird')
+            assert height.preferred >= 2 and height.max <= 8
+            pipe.send_text(newline + 'third')
             await asyncio.sleep(0.03)
             assert not task.done()
             pipe.send_text('\r')
@@ -207,30 +209,35 @@ def test_active_ctrl_c_returns_to_prompt(workspace):
     assert any('Response cancelled.' in line for line in output)
 
 
-def test_startup_capability_failure_never_opens_conversation(workspace):
+def test_startup_help_and_exit_make_no_model_requests(workspace):
     import httpx
     import pytest
-    from skua.client import ChatClient, ModelError
+    from skua.client import ChatClient
     from skua.terminal import start
-    from test_client import response_message
     cfg = build_config(workspace, [('test', {'schema_version':1,'profiles':{'default':{'base_url':'https://example/v1','model':'m','stream':False,'auth':{'enabled':False}}}})])
-    class UI:
-        def write(self, *args, **kwargs):
+    answers = iter(['/help', '/exit'])
+    output = []
+    class UI(Terminal):
+        def __init__(self):
             pass
+        def write(self, text, **kwargs):
+            output.append(text)
         async def read(self, *args):
-            pytest.fail('conversation opened without native tool support')
+            return next(answers)
     clients = []
     def factory(profile, credential):
-        client = ChatClient(profile, credential, transport=httpx.MockTransport(lambda _:httpx.Response(200,json=response_message())))
+        client = ChatClient(profile, credential, transport=httpx.MockTransport(lambda _: pytest.fail('unexpected startup request')))
         clients.append(client)
         return client
-    with pytest.raises(ModelError, match='tool-calling'):
-        asyncio.run(start(cfg,terminal=UI(),client_factory=factory))
+    asyncio.run(start(cfg,terminal=UI(),client_factory=factory))
+    assert any('/output <number> — inspect retained output' in line for line in output)
+    assert not any('Checking model tool support' in line for line in output)
     assert all(c.http.is_closed for c in clients)
     assert list(workspace.iterdir()) == []
 
 
-def test_start_to_exit_with_actual_prompt_and_mock_endpoint(workspace):
+@pytest.mark.parametrize('use_tools', [False, True])
+def test_start_to_exit_with_actual_prompt_and_mock_endpoint(workspace, use_tools):
     import httpx
     import json
     from skua.client import ChatClient
@@ -241,8 +248,9 @@ def test_start_to_exit_with_actual_prompt_and_mock_endpoint(workspace):
     def handler(request):
         payload = json.loads(request.content)
         requests.append(payload)
-        if payload.get('tools', [{}])[0].get('function', {}).get('name') == 'skua_diagnostic':
-            body = sse(event({'tool_calls':[tool(0,'remote','skua_diagnostic','{"echo":"skua"}')]}), event(finish='tool_calls'))
+        assert not any(t['function']['name'] == 'skua_diagnostic' for t in payload.get('tools', []))
+        if use_tools and not any(m['role'] == 'tool' for m in payload['messages']):
+            body = sse(event({'tool_calls': [tool(0, 'read', 'list_files', '{"path":"."}')]}), event(finish='tool_calls'))
         else:
             body = sse(event({'content':'Hello from mock.'}), event(finish='stop'))
         return httpx.Response(200, headers={'content-type':'text/event-stream'}, stream=Stream([body]))
@@ -259,7 +267,7 @@ def test_start_to_exit_with_actual_prompt_and_mock_endpoint(workspace):
             assert 'Hello from mock.' in target.getvalue()
             assert 'Unsaved conversation' in target.getvalue()
     asyncio.run(scenario())
-    assert len(requests) == 2
+    assert len(requests) == (2 if use_tools else 1)
     assert list(workspace.iterdir()) == []
 
 
@@ -308,6 +316,64 @@ def test_retained_output_inspection_does_not_call_endpoint(workspace):
     assert client.requests == 2
     assert any('retained-output' in line and 'stdout:' in line for line in output)
     assert len([e for e in state.events if e['type'] == 'tool_call']) == 1
+
+
+def test_output_opens_read_result_without_rereading_or_model_call(workspace):
+    from skua.client import ToolCall
+    (workspace / 'note.txt').write_text('retained read body\n')
+    cfg = build_config(workspace, [('test', {'schema_version': 1,
+        'profiles': {'default': {'base_url': 'https://example/v1', 'model': 'm'}}})])
+    answers = iter(['read the note', '/output 3', '/exit', 'discard'])
+    output = []
+    class UI(Terminal):
+        def __init__(self):
+            pass
+        async def read(self, message=''):
+            return next(answers)
+        def write(self, text, **kwargs):
+            output.append(text)
+    class Client:
+        requests = 0
+        async def complete(self, messages, **kwargs):
+            self.requests += 1
+            if self.requests == 1:
+                return Reply('', (ToolCall('read_file', {'path': 'note.txt'}),))
+            (workspace / 'note.txt').write_text('changed after read')
+            return Reply('done')
+    client = Client()
+    asyncio.run(conversation(cfg, client, UI()))
+    assert client.requests == 2
+    assert any('1: retained read body' in line for line in output)
+    assert not any('changed after read' in line for line in output)
+
+
+def test_output_hint_shown_once_per_prompted_turn(workspace):
+    from skua.client import ToolCall
+    cfg = build_config(workspace, [('test', {'schema_version': 1,
+        'profiles': {'default': {'base_url': 'https://example/v1', 'model': 'm'}}})])
+    answers = iter(['first task', 'second task', '/exit', 'discard'])
+    output = []
+    class UI(Terminal):
+        def __init__(self):
+            pass
+        async def read(self, message=''):
+            return next(answers)
+        def write(self, text, **kwargs):
+            output.append(text)
+    class Client:
+        requests = 0
+        async def complete(self, messages, **kwargs):
+            self.requests += 1
+            if self.requests % 2:
+                return Reply('', (ToolCall('list_files', {'path': '.'}),
+                                  ToolCall('search_files', {'path': '.', 'query': 'needle'})))
+            return Reply('done')
+    client = Client()
+    asyncio.run(conversation(cfg, client, UI()))
+    assert client.requests == 4
+    assert sum('Use /output <number>' in line for line in output) == 2
+    headings = [line for line in output if line.startswith('• ')]
+    assert len(headings) == 4 and all('#' in line for line in headings)
 
 
 def test_long_review_pager_close_does_not_approve():

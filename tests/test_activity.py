@@ -87,7 +87,7 @@ def test_slow_command_refreshes_and_sigint_cleans_up(workspace):
             assert (workspace / 'started').exists()
             first = ActivityDisplay(terminal.activity).__rich__().plain
             boundary = len(target.getvalue())
-            await asyncio.sleep(.3)
+            await asyncio.sleep(1.1)
             assert ActivityDisplay(terminal.activity).__rich__().plain != first
             assert 'Running' in target.getvalue()[boundary:]
             signal.raise_signal(signal.SIGINT)
@@ -96,7 +96,7 @@ def test_slow_command_refreshes_and_sigint_cleans_up(workspace):
         assert terminal.status is None and terminal.activity is None
         assert events[-1].status == 'cancelled', results(session)
         assert results(session)[0]['output']['retained_bytes'] == 7
-        assert 'cancelled' in target.getvalue()
+        assert 'Cancelled · run_command' in target.getvalue()
     asyncio.run(scenario())
 
 
@@ -154,11 +154,12 @@ def test_streamed_edit_test_fix_flow_keeps_text_and_diff(workspace):
     text = target.getvalue()
     for message in ['First edit.', 'Fixing the failed test.', 'Tests now pass.']:
         assert text.count(message) == 1
-    assert text.index('First edit.') < text.index('apply_patch #3: error') < text.index('Fixing the failed test.')
-    assert '-bad' in text and '+good' in text and '/output 3' in text
+    assert text.index('First edit.') < text.index('Failed · apply_patch: a.txt') < text.index('Fixing the failed test.')
+    assert '-bad' in text and '+good' in text and '#3' in text
     assert [r['status'] for r in results(session)] == ['error', 'ok']
     assert results(session)[1]['output']['retained_bytes'] == 5
-    assert f"/output {results(session)[1]['call_seq']}" in text
+    assert f"#{results(session)[1]['call_seq']}" in text
+    assert text.count('Use /output <number>') == 1
     assert terminal.activity is None and terminal.status is None
     assert (workspace / 'a.txt').read_text() == 'good\n'
 
@@ -176,6 +177,83 @@ def test_model_wait_restores_tool_and_approval_elapsed(monkeypatch):
     assert '2.5s' in terminal._toolbar()
     assert terminal.status is None
     terminal.show_activity(None)
+
+
+def test_command_block_previews_output_once_and_keeps_full_capture(workspace):
+    target = StringIO()
+    terminal = Terminal(output=DummyOutput(), console=Console(file=target, width=100))
+    async def approve(review):
+        return 'approved'
+    runtime = Runtime(config(workspace), approve=approve, on_activity=terminal.show_activity,
+                      on_notice=terminal.write)
+    command = "printf 'line-%s\\n' {1..20}; printf 'problem\\n' >&2; exit 7"
+    result = asyncio.run(runtime.execute(state(workspace), 3, 'run_command', {'command': command}))
+    rendered = target.getvalue()
+    assert 'Failed · run_command:' in rendered
+    assert '  └ line-1\n' in rendered and 'stderr: problem' in rendered
+    assert 'lines hidden' in rendered and '\n    line-10\n' not in rendered
+    assert '#3' in rendered and rendered.count('Use /output <number>') == 1 and 'exit 7' in rendered
+    assert 'line-10\n' in ''.join(c.get('text', '') for c in result.output['chunks'])
+
+
+def test_successful_read_block_summarizes_without_echoing_contents(workspace):
+    (workspace / 'notes.txt').write_text('private fixture body\n')
+    target = StringIO()
+    terminal = Terminal(output=DummyOutput(), console=Console(file=target))
+    runtime = Runtime(config(workspace), on_activity=terminal.show_activity)
+    result = asyncio.run(runtime.execute(state(workspace), 3, 'read_file', {'path': 'notes.txt'}))
+    rendered = target.getvalue()
+    assert '• Read notes.txt' in rendered and '1 total lines' in rendered
+    assert 'private fixture body' not in rendered
+    assert 'private fixture body' in result.text
+    assert '• Read notes.txt · #3' in rendered
+
+
+def test_denied_command_does_not_claim_to_have_run_or_show_output(workspace):
+    target = StringIO()
+    terminal = Terminal(output=DummyOutput(), console=Console(file=target))
+    runtime = Runtime(config(workspace), on_activity=terminal.show_activity)
+    result = asyncio.run(runtime.execute(state(workspace), 3, 'run_command', {'command': 'touch denied'}))
+    rendered = target.getvalue()
+    assert 'Denied · run_command: touch denied' in rendered and 'Do not retry' in rendered
+    assert 'Ran ' not in rendered and '(no output)' not in rendered
+    assert result.output is None and not (workspace / 'denied').exists()
+
+
+def test_output_preview_bounds_long_lines_and_preserves_literal_markup():
+    from skua.terminal import output_preview
+    output = {'chunks': [{'stream': 'stdout', 'text': '[bold]literal[/bold]\n' + 'x' * 1000},
+                         {'omitted_bytes': 42}, {'stream': 'stdout', 'text': '\x1b[31mend\n'}]}
+    lines = output_preview(output, width=40)
+    assert '[bold]literal[/bold]' in lines
+    assert any('42 bytes not retained' in line for line in lines)
+    assert all(len(line) <= 40 and '\x1b' not in line for line in lines)
+
+
+@pytest.mark.parametrize('operation', ['read_file', 'search_files', 'list_files'])
+def test_read_search_and_list_never_display_time_and_keep_number_in_heading(operation, monkeypatch):
+    monkeypatch.setattr('skua.activity.monotonic', lambda: 12.5)
+    activity = Activity('tool', operation, 9, started=0, status='ok',
+                        arguments={'path': 'source', 'query': 'needle'},
+                        result_text='saved result', data={'total_lines': 4})
+    target = StringIO()
+    terminal = Terminal(output=DummyOutput(), console=Console(file=target))
+    terminal.show_activity(activity)
+    rendered = target.getvalue()
+    assert '#9' in rendered.splitlines()[0]
+    assert '12.5s' not in rendered and '12.5s' not in ActivityDisplay(activity).__rich__().plain
+
+
+@pytest.mark.parametrize('elapsed,expected', [(.9, False), (1.1, True)])
+def test_command_time_only_appears_after_one_second(monkeypatch, elapsed, expected):
+    monkeypatch.setattr('skua.activity.monotonic', lambda: elapsed)
+    activity = Activity('tool', 'run_command', 3, started=0, status='ok',
+                        arguments={'command': 'true'}, result_text='No output.')
+    target = StringIO()
+    terminal = Terminal(output=DummyOutput(), console=Console(file=target))
+    terminal.show_activity(activity)
+    assert (f'{elapsed:.1f}s' in target.getvalue()) is expected
+    assert (f'{elapsed:.1f}s' in ActivityDisplay(activity).__rich__().plain) is expected
 
 
 @pytest.mark.parametrize('cancel', [False, True])

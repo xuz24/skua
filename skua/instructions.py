@@ -11,7 +11,10 @@ class Instructions:
 
     @classmethod
     def load(cls, config):
-        paths = {p for p in discover(config.root, include_ignored=True) if p.name == 'AGENTS.md'}
+        # Dependency/cache trees can contain tens of thousands of entries and
+        # third-party guidance. Follow project ignore rules for nested discovery;
+        # the root instruction file is an explicit exception below.
+        paths = {p for p in discover(config.root) if p.name == 'AGENTS.md'}
         if (config.root / 'AGENTS.md').exists():
             paths.add(config.root / 'AGENTS.md')
         contents = []

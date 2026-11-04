@@ -32,6 +32,7 @@ class ToolCall:
 class Reply:
     text: str
     calls: tuple[ToolCall, ...] = ()
+    refused: bool = False
 
 
 def _invalid() -> ModelError:
@@ -67,6 +68,7 @@ class Assembly:
         self.calls: dict[int, dict[str, str]] = {}
         self.finish: str | None = None
         self.started = False
+        self.refused = False
 
     def chunk(self, value: object, *, streaming: bool):
         if not isinstance(value, dict) or 'error' in value:
@@ -100,6 +102,8 @@ class Assembly:
             raise _invalid()
         if refusal is not None and not isinstance(refusal, str):
             raise _invalid()
+        if refusal:
+            self.refused = True
         for text in (content, refusal):
             if text:
                 self.started = True
@@ -159,7 +163,7 @@ class Assembly:
             if not isinstance(args, dict):
                 raise _invalid()
             calls.append(ToolCall(call['name'], args))
-        return Reply(''.join(self.text), tuple(calls))
+        return Reply(''.join(self.text), tuple(calls), self.refused)
 
 
 async def _events(response: httpx.Response):

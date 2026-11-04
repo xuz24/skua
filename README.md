@@ -3,13 +3,17 @@
 A lightweight, seagull-inspired terminal coding harness for Python 3.12+ on
 macOS/Linux, with Bash or Zsh project commands.
 
-**Current status:** milestones 1–6 are implemented: setup/configuration, internal
-shell execution, streaming terminal conversation, and local/endpoint diagnostics.
-Conversation history stays in memory until explicitly saved. JSONL save/resume,
-Markdown export, session locks, project instructions, read/search tools, and approved
-shell commands are implemented, together with reviewed text patches, recovery,
-Git checkpoints/commits, lint correction, and undo. M7 acceptance and installation
-checks pass locally; the configured remote platform matrix awaits CI results.
+**Current status:** interactive editing supports streaming, scoped session
+permissions, optional managed Git, lint correction, recovery, and context
+compaction. `skua run` adds bounded unattended tasks using the same agent loop.
+Interactive history stays in memory until explicitly saved; unattended artifacts
+are opt-in. See [VALIDATION.md](VALIDATION.md) for local and reported remote evidence.
+
+Start with [installation](#install-from-this-checkout) and [setup](#setup), then
+use [interactive chat](#conversation-and-endpoint-diagnostics) or
+[bounded unattended tasks](#bounded-unattended-tasks). For contributors, see
+[development](#development), [validation](#validation), and the optional
+[Harbor integration](#optional-harbor-integration).
 
 ## Install from this checkout
 
@@ -20,6 +24,9 @@ python -m pip install -r requirements.txt
 python -m pip install --no-deps .
 skua --help
 ```
+
+Git must be installed and available on `PATH` for file discovery and patches,
+even when managed Git is disabled.
 
 Use `python -m skua` as an alternative to the `skua` entry point. Installation
 requires package downloads; setup and configuration commands make no network
@@ -124,8 +131,9 @@ model = "project-model"
 enabled = false
 ```
 
-See the [configuration schema](.docs/config-schema.md) for all fields. Read and
-command approval rules are described below.
+Use `skua config show --sources` to inspect effective settings and their origins;
+the [configuration implementation](skua/config.py) defines all accepted fields
+and defaults. Read and command approval rules are described below.
 
 ## Conversation and endpoint diagnostics
 
@@ -135,17 +143,32 @@ skua                       # Interactive chat with the default profile
 skua --profile local       # Chat with a named profile
 ```
 
-Full diagnostics and chat startup announce a small synthetic request that may
-consume tokens. Native function-tool support is required: a missing/invalid
-response stops startup rather than silently downgrading compatibility. The test
-uses only a fixed diagnostic prompt, never project contents, and executes no
-returned calls. It checks the profile's configured streaming or nonstreaming mode.
+Chat startup makes no endpoint request. After you submit a prompt, native tool
+responses are validated as needed during that turn; there is no separate automatic
+probe. `skua squak` explicitly runs a small synthetic diagnostic that may consume
+tokens. It uses a fixed prompt, never project contents, executes no returned calls,
+and checks the profile's configured streaming or nonstreaming mode.
 
-Enter sends; Alt+Enter inserts a newline. Bracketed multiline paste remains in the
-editable input buffer until submitted. Ctrl-C cancels an active response and
+Enter sends; Shift+Enter inserts a newline when the terminal sends a distinct
+modified-Enter sequence (CSI-u or xterm modifyOtherKeys). Ctrl+J also inserts a
+newline. Terminals that send the same carriage return for Enter and Shift+Enter
+need a terminal key mapping or the Ctrl+J fallback; Skua does not change terminal
+keyboard modes. See the [terminal keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/).
+
+Bracketed pastes of 500+ characters or six+ lines appear as `[N chars]` in the
+composer. Their complete text is submitted, with CRLF/CR normalized to LF as for
+ordinary pastes. Blocks can be moved past, selected, deleted, or restored with
+undo as a single item. History recall keeps the original paste. Typing a label
+like `[600 chars]` manually sends that literal text. Smaller pastes and manual
+typing remain visible normally; clearing a draft removes its paste blocks from
+the submitted input. Paste contents stay in memory with input history and are
+not saved separately.
+
+Ctrl-C cancels an active response and
 returns to the prompt, or clears an unsent draft. With an empty draft, two
 consecutive Ctrl-C presses request exit; Ctrl-D on empty input does the same.
-The scrolling prompt uses a single-row shaded input area, a simple chevron, keyboard hints, and Tab completion
+The scrolling prompt uses a shaded, wrapping input area that grows from one to
+eight rows, a simple chevron, keyboard hints, and Tab completion
 for discovered project paths. Completion lists names only; it does not read or
 attach file contents. `/context` shows an approximate token estimate based on
 serialized character count; compatible endpoints may use different tokenization
@@ -189,6 +212,9 @@ this condition rather than repeatedly compacting or discarding recent work.
 Nothing is automatically saved. `/compact` remains available with automatic mode off.
 
 The startup animation plays on the first interactive launch for an installation.
+It uses eased cell transitions at up to 30 fps, with a short entrance and exit,
+and finishes in about one second. Playback preserves the terminal background and
+crops to small viewports without wrapping animation rows into scrollback.
 Set `[ui].startup_animation` to `"always"` to replay on every launch or `"never"`
 to suppress it. Its first-run marker is stored in the user's global state directory
 and shared across projects.
@@ -282,8 +308,10 @@ built-ins. Both lexical and resolved paths are checked. Shell review combines
 recognizable sensitive/external paths with execution approval and highlights dot
 paths. This inspection is best-effort; scripts and indirect reads can evade it.
 
-Root and nested `AGENTS.md` files refresh at each user turn, including ignored
-subtrees. External instruction symlinks and configured sensitive instruction files
+Root and nested `AGENTS.md` files refresh at each user turn. Nested discovery
+respects `.gitignore`, skipping ignored files and subtrees such as virtual
+environments and caches. The root `AGENTS.md` is loaded even if ignored.
+External instruction symlinks and configured sensitive instruction files
 are skipped. Guidance is scoped to its directory subtree, remains stable throughout
 the turn, and cannot grant permissions. Individual instruction files are capped at
 100,000 bytes and the snapshot at 500,000 bytes. Changes and active paths are shown.
@@ -296,14 +324,28 @@ is bounded and cannot establish a complete audit. A separate reviewed commit off
 is available for attributable command changes; declining leaves them uncommitted.
 Use `/output <call-seq>` to inspect retained stdout/stderr without rerunning a
 command. Successful and failed lint output is retained on its patch call as well.
+For other tools, `/output` shows the saved tool-result text without rereading files
+or calling the model. Existing capture and model-output limits still apply.
 Retained output is included when explicitly saving the session.
+Command results report exit code, execution time, timeout/cancellation, and any
+reviewed commit. Empty streams are omitted; truncation notices distinguish bytes
+discarded from bytes still retained outside the preview. Empty reads, file lists,
+and searches return an explicit result instead of blank text.
 
 During a turn, a refreshing activity line distinguishes waiting for the model,
-waiting for approval, and running a tool. It shows elapsed time and the tool's
+waiting for approval, and running a tool. Elapsed time appears only after one
+second, and read/list/search operations omit timing entirely. It shows the tool's
 call number; approval timing appears in the prompt or diff pager so progress does
 not overwrite the review. Tool elapsed time includes its reviews and follow-up
-work. Each tool ends with a concise status (including denial, timeout, or
-cancellation), plus its exit code and `/output` link when available. Ctrl-C cancels
+work. Completed tools appear as compact blocks: `Ran <command>`, `Read <path>`,
+`Searched <query> in <path>`, or `Updated <paths>`. Commands show up to six preview
+lines plus an omission marker; reads, searches, and patches show summaries.
+Failures, denials, timeouts, and cancellations have explicit labels. Each block
+includes a call number and exit code when available. Read/list/search headings
+keep the number on the same line. The `/output <number>` hint appears at most once
+per prompted turn; `/help` documents it. Other tools show elapsed time only when
+they take at least one second. Long preview lines are clipped only for display;
+retained output and model-facing results are unchanged. Ctrl-C cancels
 active work and clears progress; captured command output remains inspectable.
 Streamed reply text is preserved when switching to reviews and tool summaries.
 Activity timing is temporary display state, not saved session history.
@@ -502,6 +544,13 @@ Captured output and file changes remain; detached processes are outside this
 guarantee. This is not a filesystem sandbox. Model-requested commands require
 approval; there is no separate general command-execution CLI.
 
+`run_command` accepts optional `timeout_seconds` (alias `timeout`) as a positive,
+finite number of seconds. The effective timeout is capped by the configured
+command timeout and the remaining unattended task time. Conflicting aliases,
+strings, booleans, and nonpositive values are rejected before execution. Omitting
+both uses the configured limit. Each result records requested, configured, and
+effective timeouts; this does not change model, tool-call, or dollar budgets.
+
 ## Development
 
 ```sh
@@ -517,12 +566,137 @@ python -m piptools compile --no-build-isolation --strip-extras --output-file=req
 python -m piptools compile --no-build-isolation --strip-extras --allow-unsafe --extra=dev --constraint=requirements.txt --output-file=requirements-dev.txt pyproject.toml
 ```
 
-Pins are generated with Python 3.12. Platform/Python coverage is recorded in the
-implementation plan; they are not yet validated across the full macOS/Linux
-matrix. Tests use temporary homes/projects and do not need an endpoint or real key.
+Pins are generated with Python 3.12. Platform/Python coverage is recorded in
+[VALIDATION.md](VALIDATION.md); the full macOS/Linux matrix has not been verified
+locally. Tests use temporary homes/projects and do not need an endpoint or real key.
+The optional Harbor tests use a separate environment and must be invoked explicitly;
+see the [integration setup](integrations/harbor/README.md).
 
-Design: [implementation plan](.docs/implementation-plan.md),
-[session schema](.docs/session-schema.md), and [product decisions](.docs/design.md).
+Keep local credentials, project configuration, exported notes, and run artifacts
+out of commits. The ignore rules cover `.env` variants (except `.env.example`),
+`.skua/config.toml`, default session/recovery/cache directories, and `.notes/`.
+Use `.skua/.tmp/` for local bundles, benchmark data, and unattended result/transcript
+files; custom output locations need their own ignore rules. Before pushing, review
+`git status --short --untracked-files=all` and `git diff --check`. Ignore rules do
+not remove files that are already tracked.
+
+## Bounded unattended tasks
+
+Configure a model with `skua init` or a config file, then supply task text through
+a UTF-8 file or stdin. Authentication still uses the configured environment
+variable or project `.env`; there is no command-line credential option.
+
+```sh
+skua run --root /path/to/workspace --prompt-file /path/to/task.txt \
+  --policy disposable --max-seconds 300 --max-tool-calls 100 \
+  --result-file /path/to/new-result.json --transcript-file /path/to/new-history.jsonl
+
+cat task.txt | skua run --root /path/to/workspace --prompt-file - --policy review
+```
+
+`--policy` is required. `review` permits existing unreviewed read/list/search
+operations, then stops at the first action requiring approval. `disposable`
+authorizes ordinary patches and entire shell commands without asking. Detected
+sensitive or external access still returns `approval_required`. Shell commands can
+execute project code and access arbitrary files: **policy is not a sandbox**.
+Use an externally isolated, disposable environment for unattended commands.
+`container` additionally authorizes reads, patches, and commands referencing paths
+outside the project root. Select it only inside an externally isolated container
+without host credentials or writable host mounts; it does not create or verify
+isolation. Detected sensitive paths still require approval. Harbor selects this
+policy explicitly; interactive defaults and `disposable` remain unchanged.
+Command-path detection is heuristic. Python heredoc bodies are scanned for quoted
+path literals rather than treating arithmetic punctuation as shell arguments.
+An optional Harbor adapter is available under
+[integrations/harbor](integrations/harbor/README.md); its synthetic Docker
+acceptance checks passed locally.
+
+Managed Git is **off for headless runs**, independently of the interactive config.
+Add `--managed-git on` to opt into initialization/checkpoints/commits; the
+`disposable` and `container` policies can authorize these actions automatically. Existing author,
+identity, staging, lint, and recovery checks still apply. Unmanaged runs leave
+edits uncommitted. No headless policy prompts for input, Git approval, or recovery.
+If `reason` is `recovery_pending`, resolve the unfinished patch through interactive
+Skua in that workspace, inspect the resulting files, then retry the task.
+
+`--max-seconds` defaults to 300 and must be positive and finite. It covers execution
+after the task has been read, including model requests/retries, tools, and context
+handling. Stdin must end at EOF. At the deadline, active work is cancelled and
+cleanup is awaited; process termination or an in-flight filesystem/Git mutation
+can extend wall time beyond the deadline. Git subprocesses retain their existing
+60-second timeout. This is an execution deadline, not a hard process-kill timer.
+SIGINT and SIGTERM use the same cleanup path.
+
+`--max-tool-calls` defaults to 100 and counts model-requested calls across all
+responses, including invalid and denied calls. Internal lint/Git steps belong to
+the initiating call and remain subject to the time limit. The explicit total
+budget replaces interactive block-continuation prompts; no further calls execute
+once exhausted. A final model response without tools can complete at the exact
+limit. Unexecuted calls in an already received batch are recorded as `not_run`.
+
+Unattended runs provide the model with refreshed working-directory, interpreter,
+package-manager, build-tool, and budget context before each planning call. Discovery
+only checks executable paths; it does not run programs, import modules, install
+dependencies, or execute activation scripts. PATH results describe the environment
+before shell startup/activation and may differ from the configured task environment.
+The context identifies Skua's Python separately and directs the agent to check task
+prerequisites with the selected task interpreter.
+
+Remaining time, remaining tool calls, configured command timeout, and output limits
+are visible to the model. Command dispatch records the effective ceiling (the smaller
+of remaining task time and command timeout); tool results include remaining time.
+These snapshots do not extend the existing shared deadline or grant permissions.
+Optional transcripts retain `runtime_context` and `command_budget` notices for review.
+
+Unattended guidance asks the agent to perform the requested work, choose an observable
+acceptance check, and verify the resulting state before concluding. Creating a setup
+script is an intermediate step when the task asks for a configured service; writing
+an answer file does not validate a failed calculation. Advice-only and code-only
+requests retain their scope. The final response should describe observed checks and
+remaining blockers. This is model guidance, not an automatic correctness gate, and
+does not add retries, permissions, or budget.
+
+Stdout contains one JSON outcome object; streamed model/tool content is retained
+in the optional transcript, not mixed into stdout. The `message` and `next_step`
+fields explain the outcome and follow-up in plain language; automation should use
+the stable `status`, `reason`, and `exit_code` fields. Exit codes are:
+
+| Status | Exit code | Meaning |
+| --- | ---: | --- |
+| `completed` | 0 | The agent turn ended normally, with no pending lint correction or final tool error |
+| `failed` | 1 | Configuration, execution, endpoint, input/artifact error, or unresolved final tool error |
+| `approval_required` | 3 | Policy requires interactive review, or recovery must be resolved |
+| `budget_exhausted` | 124 | Total time or tool-call budget reached |
+| `cancelled` | 130 | Execution cancelled, including SIGINT/SIGTERM |
+
+Invalid CLI syntax/limits use argparse's exit code 2 and stderr usage text.
+A completed turn **does not verify task success**: `task_success_verified` is
+always false, and `provider_usage` remains null. External tests/verifiers must
+establish correctness. Earlier tool errors can be corrected during the same turn;
+inspect the transcript for the full sequence.
+
+`diagnostics` contains `model_refusal` when the endpoint explicitly supplies a
+nonempty refusal field; the transcript retains a matching notice. Refusal prose
+without that field is not automatically classified. This diagnostic does not turn
+a normally completed response into a transport error or trigger a retry. It does
+not establish task success; external evaluation remains separate.
+
+`--result-file` stores the same JSON metadata as stdout; `--transcript-file`
+stores native JSONL history. Paths are relative to the invoking directory, require
+existing parent directories, and must not already exist. Files are created with
+mode 0600; an existing file or symlink is never overwritten. Preflight failure may
+leave a reserved artifact empty (for example, no session exists when recovery
+blocks startup). `input_or_artifact_error` means to check task readability/UTF-8,
+the 1 MB task limit, destination existence, and parent-directory permissions.
+Configuration failure before artifact setup returns JSON on stdout only.
+
+Outcome metadata omits task text, paths, endpoint/model identity, credentials, and
+raw exception messages. The optional transcript contains task/model/tool data and
+can be sensitive; the resolved API credential is redacted, but this is not a
+universal secret scrubber. Redaction can alter identity fields, so a redacted
+transcript is not guaranteed to be resumable. No artifact or transcript is saved unless requested.
+Approval records use `authorization.source = "unattended_policy"`, with no
+reusable grant or credential/environment snapshot persisted.
 
 ## Validation
 
@@ -576,3 +750,20 @@ Approve the fixture reviews, inspect the incremental response text, diff display
 and elapsed lint progress, then enter `/context` and `/exit`, choosing `discard`.
 The script verifies final content, authorization counts, Git state, compaction,
 and absence of transcript saves. It does not measure real-provider behavior.
+
+
+### Optional Harbor integration
+
+The [Harbor adapter](integrations/harbor/README.md) uses a separate Harbor 0.25.0
+host environment, a SHA-256-pinned Skua wheel, and validated ATIF-v1.8 exports.
+The synthetic container suite requires Docker; it can also be run through the
+manual [Harbor integration smoke](.github/workflows/harbor.yml) workflow after
+pushing. Recorded local Docker trials passed for verified success, failure
+artifacts, and timeout artifacts; remote workflow execution remains unverified.
+
+The [Terminal-Bench harness](integrations/harbor/benchmark/README.md) adds dataset
+selection, a host-side budget gateway, pilot gates, and artifact reports. Paid
+partial evaluations were run and stopped; they do not establish a complete
+benchmark score. See the [stopped-run review](integrations/harbor/benchmark/REVIEW.md)
+and [validation record](VALIDATION.md) for historical results and limitations.
+Keep real-run artifacts local; the CI workflow uses synthetic fixtures.

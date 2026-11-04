@@ -22,11 +22,26 @@ def _common(parser: argparse.ArgumentParser) -> None:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog="skua", description="A lightweight terminal coding harness (interactive conversation and diagnostics).")
+    result = argparse.ArgumentParser(prog="skua", description="A lightweight terminal coding harness (interactive chat, bounded tasks, and diagnostics).")
     result.add_argument("--version", action="version", version=f"skua {__version__}")
     _common(result)
     result.add_argument("--resume", metavar="ID_OR_PATH", help="resume a saved session in this project")
     commands = result.add_subparsers(dest="command")
+    from .headless import positive_seconds
+    def positive_count(value):
+        count = int(value)
+        if count < 1:
+            raise argparse.ArgumentTypeError('must be a positive integer')
+        return count
+    run = commands.add_parser('run', help='run one bounded task without terminal prompts')
+    _common(run)
+    run.add_argument('--prompt-file', required=True, metavar='TASK', help='UTF-8 task file, or - for stdin ending at EOF')
+    run.add_argument('--policy', required=True, choices=['review', 'disposable', 'container'], help='explicit unattended authorization policy; container allows external paths and requires caller-provided isolation (not a sandbox)')
+    run.add_argument('--max-seconds', type=positive_seconds, default=300, help='total execution time before cancellation (default: 300)')
+    run.add_argument('--max-tool-calls', type=positive_count, default=100, help='total model-requested tool calls (default: 100)')
+    run.add_argument('--managed-git', choices=['off', 'on'], default='off', help='explicit Git workflow selection; disposable policy can authorize Git only when on')
+    run.add_argument('--result-file', help='optional new JSON metadata file; never overwritten')
+    run.add_argument('--transcript-file', help='optional new native JSONL transcript; may contain task and tool data')
     sessions = commands.add_parser("sessions", help="list saved sessions offline")
     _common(sessions)
     init = commands.add_parser("init", help="configure global defaults or project overrides; no network requests")
@@ -60,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
             run_setup(root, project=args.project, profile=selected)
             return 0
         config = load_config(root, profile=selected)
+        if args.command == 'run':
+            from .headless import cli_run
+            return cli_run(config, args)
         if args.command == "sessions":
             print(safe_text("\n".join(Store(root, config.sessions_directory).list_sessions()) or "No saved sessions."))
             return 0
@@ -92,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return run_chat(config, resume=args.resume) if args.resume is not None else run_chat(config)
     except (ConfigError, ModelError, StorageError) as exc:
+        if args.command == 'run':
+            from .headless import report
+            print(json.dumps(report('failed', 'configuration_error', policy=args.policy,
+                                    managed_git=args.managed_git == 'on')))
+            return 1
         print(f"skua: {exc}", file=sys.stderr)
         return 2
     except (KeyboardInterrupt, EOFError):

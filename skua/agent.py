@@ -31,7 +31,10 @@ def batch(session, reply):
 
 
 async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=lambda _: None,
-                   on_notice=lambda _: None, on_waiting=lambda _: None, runtime=None) -> None:
+                   on_notice=lambda _: None, on_waiting=lambda _: None, runtime=None,
+                   max_tool_calls: int | None = None) -> None:
+    if max_tool_calls is not None and (isinstance(max_tool_calls, bool) or max_tool_calls < 1):
+        raise ValueError('max_tool_calls must be positive')
     session.begin(text)
     partial = []
     pending = []
@@ -74,9 +77,11 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
         else:
             system = [{'role': 'system', 'content': 'You are Skua. Tools are unavailable; answer using supplied text only.'}]
         while True:
+            context = runtime.run_context if runtime else None
             if runtime and runtime.config.context.auto_compact and not compaction_attempted:
+                request_system = [*system, context.message(dispatched)] if context else system
                 policy = runtime.config.context
-                size = estimate([*system, *session.active_messages()], CATALOG if not stopped else ())
+                size = estimate([*request_system, *session.active_messages()], CATALOG if not stopped else ())
                 if size * 100 >= policy.budget_tokens * policy.threshold_percent:
                     compaction_attempted = True
                     on_notice(f'Automatic compaction: ~{size:,} tokens estimated; '
@@ -90,7 +95,7 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                         on_notice(f'Automatic compaction skipped or failed: {exc}. '
                                   'Active context unchanged; no more attempts this turn.')
                     else:
-                        remaining = estimate([*system, *session.active_messages()], CATALOG if not stopped else ())
+                        remaining = estimate([*request_system, *session.active_messages()], CATALOG if not stopped else ())
                         on_notice(f'Context compacted: ~{remaining:,} tokens estimated. Full history preserved.')
                         if remaining * 100 >= policy.budget_tokens * policy.threshold_percent:
                             on_notice('Context remains above the configured threshold; '
@@ -101,7 +106,11 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                 kwargs['tools'] = CATALOG
             try:
                 set_working(True)
-                reply = await client.complete([*system, *session.active_messages()], **kwargs)
+                # Refresh after compaction/model preparation, not only at turn start.
+                request_system = [*system, context.message(dispatched)] if context else system
+                if context:
+                    session.notice('runtime_context', request_system[-1]['content'])
+                reply = await client.complete([*request_system, *session.active_messages()], **kwargs)
             except ModelError as exc:
                 if runtime and not stopped and exc.code in {'invalid_response', 'unsupported_tools'} and corrections < 3:
                     corrections += 1
@@ -113,6 +122,8 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                 raise
             finally:
                 set_working(False)
+            if reply.refused:
+                session.notice('model_refusal', 'Endpoint explicitly reported a refusal.')
             if not reply.calls:
                 session.finish(reply.text)
                 return
@@ -125,7 +136,11 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                 session.finish('Automatic work stopped. Returned to the prompt.', 'error', 'tools_stopped')
                 return
             for call in reply.calls:
-                if dispatched and dispatched % runtime.config.tool_calls_per_block == 0:
+                if max_tool_calls is not None and dispatched >= max_tool_calls:
+                    not_run('Total tool-call budget exhausted. Not executed.')
+                    session.finish('', 'error', 'tool_budget')
+                    return
+                if max_tool_calls is None and dispatched and dispatched % runtime.config.tool_calls_per_block == 0:
                     try:
                         proceed = runtime.continue_block is not None and await runtime.continue_block(dispatched)
                     except (asyncio.CancelledError, EOFError):
@@ -150,6 +165,10 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
                     session.finish('', 'cancelled', 'user_cancelled')
                     on_notice('Operation cancelled.')
                     return
+                if max_tool_calls is not None and result.status == 'denied':
+                    not_run('Unattended policy requires approval. Not executed.')
+                    session.finish('', 'error', 'approval_required')
+                    return
                 if result.status == 'denied' or corrections >= 4 or result.code == 'lint_exhausted':
                     not_run('Automatic work stopped before dispatch.')
                     stopped = True
@@ -169,3 +188,12 @@ async def run_turn(session: Session, client: ChatClient, text: str, *, on_text=l
         session.notice(code, str(exc))
         session.finish(''.join(partial), 'error', code)
         on_notice(str(exc))
+    except Exception:
+        if max_tool_calls is None:
+            raise
+        # Headless callers need a closed canonical turn even for unexpected failures.
+        # Do not put arbitrary exception text (possibly endpoint secrets) in artifacts.
+        if pending and executing:
+            Result('error', 'Unexpected execution error.').record(session, pending.pop(0))
+        not_run('Turn stopped before dispatch.')
+        session.finish(''.join(partial), 'error', 'execution_error')

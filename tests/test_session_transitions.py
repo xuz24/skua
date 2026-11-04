@@ -232,7 +232,6 @@ def test_interrupted_transition_keeps_session_and_lock(workspace):
 
 
 def test_accepted_cli_resume_uses_history_and_updates_original_save(workspace):
-    from skua.client import ToolCall
     session = state(workspace)
     path = save(session, store(workspace))
     identity = session.session_id
@@ -245,15 +244,13 @@ def test_accepted_cli_resume_uses_history_and_updates_original_save(workspace):
             pass
         async def complete(self, messages, **kwargs):
             requests.append(messages)
-            if kwargs.get('tools', [{}])[0].get('function', {}).get('name') == 'skua_diagnostic':
-                return Reply('', (ToolCall('skua_diagnostic', {'echo':'skua'}),))
+            assert not any(t['function']['name'] == 'skua_diagnostic' for t in kwargs.get('tools', []))
             return await super().complete(messages, **kwargs)
     ui = UI(['yes','continue','/exit','save'])
     asyncio.run(start(config(workspace,'new-model'), terminal=ui,
                       client_factory=lambda *args: Connected(), resume=str(path)))
-    assert len(requests) == 2
-    assert len(requests[0]) == 1  # Capability probe never carries saved history.
-    assert [message['content'] for message in requests[1][1:]] == ['hello','answer','continue']
+    assert len(requests) == 1
+    assert [message['content'] for message in requests[0][1:]] == ['hello','answer','continue']
     restored = store(workspace).load(str(path))
     assert restored.session_id == identity and not restored.dirty
     assert restored.current_model.model == 'new-model'

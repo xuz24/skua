@@ -119,6 +119,16 @@ def test_bounded_noisy_streams(workspace):
     assert 'discarded beyond retention' in result.preview()
 
 
+def test_command_preview_only_describes_present_output(workspace):
+    assert run(config(workspace), 'true').preview() == 'No stdout or stderr output.'
+    preview = run(config(workspace), 'printf hello').preview()
+    assert preview == 'stdout:\nhello'
+    limited = run(config(workspace, output={'retain_max_bytes': 20, 'model_max_bytes': 4}),
+                  'printf abcdefghij').preview()
+    assert '8 additional bytes retained' in limited
+    assert 'discarded beyond retention' not in limited
+
+
 @pytest.mark.parametrize('limit', [0, 1, 2, 7, 100])
 def test_capture_chunk_boundaries(limit):
     capture = Capture(limit)

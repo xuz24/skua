@@ -138,7 +138,7 @@ async def workflow(root, *, smoother=False, shell='/bin/bash', streaming=True, i
         await asyncio.sleep(.05)
         if len(results) < 2:
             if results:
-                assert 'error' in results[-1]['content']
+                assert 'lint did not pass' in results[-1]['content']
             return reply('Applying the fix.' if results else 'Editing the fixture, then running lint.',
                 calls=[('apply_patch', {'message': 'Fix fixture', 'changes': [
                     {'op': 'write', 'path': 'src/a.txt', 'content': 'fixed\n' if results else 'broken\n'}]})],
@@ -175,7 +175,8 @@ async def workflow(root, *, smoother=False, shell='/bin/bash', streaming=True, i
         assert 'Running' in rendered
         assert 'Lint passed after the correction.' in rendered
         for result in results:
-            assert f"/output {result['call_seq']}" in rendered
+            assert f"#{result['call_seq']}" in rendered
+        assert rendered.count('Use /output <number>') == 1
         if not smoother:
             assert '-broken' in rendered and '+fixed' in rendered
     decode(encoded(session, None), root)

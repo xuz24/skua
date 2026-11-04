@@ -385,12 +385,13 @@ def test_undo_never_contacts_or_inspects_remotes(workspace, monkeypatch, strateg
         assert 'new reversing commit' in reviews[0].summary
 
 
-def test_command_commit_requires_separate_review(workspace):
+@pytest.mark.parametrize('commit_decision', ['approved', 'denied'])
+def test_command_commit_requires_separate_review(workspace, commit_decision):
     repo = init(workspace)
     reviews = []
     async def approve(review):
         reviews.append(review)
-        return 'denied' if review.action == 'commit' else 'approved'
+        return commit_decision if review.action == 'commit' else 'approved'
     runtime = Runtime(config(workspace), approve=approve)
     session = state(workspace)
     session.begin('command')
@@ -402,7 +403,13 @@ def test_command_commit_requires_separate_review(workspace):
     session.finish('done')
     assert result.status == 'ok'
     assert [r.action for r in reviews] == ['command', 'commit']
-    assert repo.head() == before
+    if commit_decision == 'approved':
+        assert repo.head() != before
+        assert f'Reviewed targets committed: {repo.head()}' in result.text
+        assert 'Changes remain uncommitted' not in result.text
+    else:
+        assert repo.head() == before
+        assert 'Skua did not commit these changes.' in result.text
     decode(encoded(session, None), workspace)
 
 

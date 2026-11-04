@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from importlib.resources import files
 
 from rich.console import Console, Group
@@ -16,6 +18,43 @@ from rich.text import Text
 
 MAX_ASSET_BYTES = 1_000_000
 MAX_DIMENSION = 100
+FRAME_INTERVAL = 1 / 30
+TRANSITION_SECONDS = .15
+
+
+def _transition(before, after, progress):
+    """Ordered cell dissolve: preserve palette and the terminal's own background.
+
+    A stable spatial threshold avoids random sparkle and needs no assumption
+    about whether the user has a dark or light terminal theme.
+    """
+    if progress <= 0:
+        return before
+    if progress >= 1:
+        return after
+    eased = progress * progress * (3 - 2 * progress)
+    thresholds = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+    rows = []
+    for y, (old, new) in enumerate(zip(before, after)):
+        row = Text(no_wrap=True, overflow='crop')
+        for x in range(len(old.plain)):
+            source = new if eased >= (thresholds[y % 4][x % 4] + .5) / 16 else old
+            row.append_text(source[x:x + 1])
+        rows.append(row)
+    return rows
+
+
+def _playback(frames):
+    """Generate intermediate frames without accumulating a second full asset."""
+    blank = [Text(' ' * len(row.plain), no_wrap=True) for row in frames[0][0]]
+    previous = blank
+    segments = [(frames[0][0], TRANSITION_SECONDS), *frames[1:],
+                (frames[-1][0], frames[0][1]), (blank, TRANSITION_SECONDS)]
+    for target, duration in segments:
+        steps = max(1, math.ceil(duration / FRAME_INTERVAL))
+        for step in range(1, steps + 1):
+            yield _transition(previous, target, step / steps), duration / steps
+        previous = target
 
 
 def _state_path() -> Path:
@@ -139,9 +178,17 @@ async def maybe_play(mode: str, console: Console | None = None) -> bool:
         with Live(console=console, auto_refresh=False, transient=True,
                   vertical_overflow="crop") as live:
             try:
-                for frame, delay in frames:
+                # Crop both axes before Live measures its layout; wrapping a row
+                # would change the drawing height on narrow terminals.
+                cropped = [([row[:max(1, console.width - 1)] for row in frame[:max(1, console.height - 1)]], delay)
+                           for frame, delay in frames]
+                deadline = time.monotonic()
+                for frame, delay in _playback(cropped):
+                    deadline += delay
+                    if time.monotonic() >= deadline:
+                        continue  # Drop a late frame instead of stalling startup.
                     live.update(Group(*frame), refresh=True)
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(max(0, deadline - time.monotonic()))
             finally:
                 # Live.stop renders without cropping; erase before that redraw.
                 live.update(Text())

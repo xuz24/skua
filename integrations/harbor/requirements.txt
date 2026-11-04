@@ -1,0 +1,3 @@
+# Optional host environment only; never install into Skua's runtime environment.
+harbor==0.25.0
+pytest==8.4.2

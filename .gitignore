@@ -3,11 +3,19 @@
 .env.*
 !.env.example
 .venv/
+venv/
+ENV/
+.envrc
 
 # Python caches and test artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
 .coverage
 .coverage.*
 htmlcov/
@@ -18,7 +26,9 @@ coverage.xml
 build/
 dist/
 
-# Local Skua history, locks, recovery snapshots, and wheel caches
+# Local Skua configuration, history, exports, recovery snapshots, and wheel caches
+.skua/config.toml
+.notes/
 .skua/sessions/
 .skua/locks/
 .skua/.tmp/

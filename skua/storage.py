@@ -251,8 +251,8 @@ def validate(header: dict, events: list[dict], root: Path):
             if 'authorization' in record:
                 authorization = record['authorization']
                 fields(authorization, {'source', 'grant_id'}, 'authorization')
-                enum(authorization['source'], {'review', 'session_grant'}, 'authorization.source')
-                if authorization['source'] == 'review':
+                enum(authorization['source'], {'review', 'session_grant', 'unattended_policy'}, 'authorization.source')
+                if authorization['source'] in {'review', 'unattended_policy'}:
                     check(authorization['grant_id'] is None, 'authorization.grant_id')
                 else:
                     text(authorization['grant_id'], 'authorization.grant_id', True)

@@ -73,8 +73,16 @@ class CommandResult:
         out = self.stdout.preview((self.model_max_bytes + 1) // 2)
         err = self.stderr.preview(self.model_max_bytes // 2)
         discarded = self.stdout.omitted_bytes + self.stderr.omitted_bytes
-        return (f'stdout:\n{out.text()}\nstderr:\n{err.text()}\n'
-                f'[{discarded} bytes discarded beyond retention; previews may omit additional retained bytes]')
+        sections = [f'{name}:\n{capture.text()}' for name, capture in [('stdout', out), ('stderr', err)]
+                    if capture.total_bytes]
+        if not sections:
+            return 'No stdout or stderr output.'
+        if discarded:
+            sections.append(f'[{discarded} bytes discarded beyond retention.]')
+        retained_omitted = out.omitted_bytes + err.omitted_bytes - discarded
+        if retained_omitted:
+            sections.append(f'[{retained_omitted} additional bytes retained but omitted from this preview.]')
+        return '\n'.join(sections)
 
 
 def _signal_group(pid: int, sig: int) -> bool:

@@ -16,7 +16,7 @@ def test_complete_workflow(workspace, monkeypatch, shell, streaming):
     monkeypatch.setattr('socket.socket.connect', smoke.blocked)
     monkeypatch.setattr('socket.create_connection', smoke.blocked)
     count = asyncio.run(smoke.workflow(workspace, shell=shell, streaming=streaming))
-    assert count == 15
+    assert count == 13  # No synthetic probes when starting or resuming chat.
 
 
 def test_readme_toml_examples_validate(workspace):
@@ -32,3 +32,11 @@ def test_readme_toml_examples_validate(workspace):
         parsed = parse_config(source.encode(), f'README example {index}')
         config = build_config(workspace, [('fixture', base), (f'example {index}', parsed)])
         assert config.profile().base_url and config.profile().model
+
+
+@pytest.mark.parametrize('shell', [p for p in ('/bin/bash', '/bin/zsh') if Path(p).exists()])
+@pytest.mark.parametrize('streaming', [True, False])
+def test_installed_headless_scenario(workspace, monkeypatch, shell, streaming):
+    monkeypatch.setattr('socket.socket.connect', smoke.blocked)
+    monkeypatch.setattr('socket.create_connection', smoke.blocked)
+    asyncio.run(smoke.headless_workflow(workspace, shell=shell, streaming=streaming))

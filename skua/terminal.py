@@ -22,9 +22,10 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from .activity import Activity
+from .composer import PasteBlocks, shifted_enter
 from .context import compact, estimate as estimate_context
 from .agent import run_turn
-from .client import ChatClient, ModelError, check_capabilities
+from .client import ChatClient, ModelError
 from .config import Config, ConfigError, resolve_credential
 from .session import ModelIdentity, Session
 from .storage import Store, StorageError, snapshot, path_for, owns_export
@@ -69,6 +70,51 @@ def safe_text(text: str) -> str:
     return ''.join(c for c in text if c in '\n\t' or (ord(c) >= 32 and not 127 <= ord(c) < 160))
 
 
+def compact_text(value, width=100):
+    text = ' '.join(safe_text(str(value)).split())
+    return text if len(text) <= width else text[:max(0, width - 1)] + '…'
+
+
+def tool_subject(activity):
+    args = activity.arguments or {}
+    if activity.operation == 'run_command':
+        return compact_text(args.get('command', 'command'))
+    if activity.operation == 'search_files':
+        return compact_text(f'{args.get("query", "")} in {args.get("path", ".")}')
+    if activity.operation == 'apply_patch':
+        changes = args.get('changes')
+        if isinstance(changes, list):
+            paths = [str(c.get('path', '?')) + (f' → {c["destination"]}' if c.get('op') == 'rename' and 'destination' in c else '')
+                     for c in changes if isinstance(c, dict)]
+            return compact_text(', '.join(paths[:3]) + (f' (+{len(paths) - 3} more)' if len(paths) > 3 else '')) or 'patch'
+        return 'patch'
+    return compact_text(args.get('path', activity.operation))
+
+
+def output_preview(output, *, width=100):
+    """A terminal-only preview; retain the original capture for /output."""
+    streams = {'stdout': '', 'stderr': ''}
+    stream = 'stdout'
+    for chunk in output['chunks']:
+        if 'stream' in chunk:
+            stream = chunk['stream']
+            streams[stream] += chunk['text']
+        elif chunk.get('omitted_bytes'):
+            streams[stream] += f'\n[{chunk["omitted_bytes"]} bytes not retained]\n'
+    lines = []
+    for stream, text in streams.items():
+        if text:
+            parts = safe_text(text).expandtabs(4).splitlines()
+            if stream == 'stderr' and parts:
+                parts[0] = 'stderr: ' + parts[0]
+            lines.extend(parts)
+    if not lines:
+        return ['(no output)']
+    if len(lines) > 6:
+        lines = lines[:2] + [f'… {len(lines) - 6} lines hidden …'] + lines[-4:]
+    return [line if len(line) <= width else line[:max(0, width - 1)] + '…' for line in lines]
+
+
 def diff_style(line, limited_colors=False):
     header = '#000080' if limited_colors else '#293443'
     added = '#008000' if limited_colors else '#163b2b'
@@ -99,6 +145,9 @@ class ReviewLexer(Lexer):
         return get_line
 
 
+READ_TOOLS = {'read_file', 'search_files', 'list_files'}
+
+
 class ActivityDisplay:
     def __init__(self, activity):
         self.activity = activity
@@ -107,9 +156,12 @@ class ActivityDisplay:
         activity = self.activity
         label = {'tool': 'Running', 'model': 'Waiting for model',
                  'approval': 'Waiting for approval', 'compaction': 'Compacting context'}[activity.phase]
-        operation = '' if activity.phase == 'model' else ' · ' + activity.operation
+        operation = '' if activity.phase == 'model' else ' · ' + (
+            tool_subject(activity) if activity.phase == 'tool' else activity.operation)
         call = f' #{activity.call_seq}' if activity.call_seq is not None else ''
-        return Text(safe_text(f'{label}{operation}{call} · {activity.elapsed:.1f}s · Ctrl-C cancel'))
+        elapsed = activity.elapsed
+        timing = f' · {elapsed:.1f}s' if elapsed >= 1 and activity.operation not in READ_TOOLS else ''
+        return Text(safe_text(f'{label}{operation}{call}{timing} · Ctrl-C cancel'))
 
 
 class Terminal:
@@ -123,6 +175,7 @@ class Terminal:
         self.status = None
         self.activity = None
         self.context_label = 'context not estimated'
+        self.paste_blocks = PasteBlocks()
         bindings = KeyBindings()
 
         @bindings.add('enter')
@@ -130,10 +183,18 @@ class Terminal:
             self.exit_armed = False
             event.current_buffer.validate_and_handle()
 
-        @bindings.add('escape', 'enter')
+        @bindings.add('c-j')
         def newline(event):
             self.exit_armed = False
             event.current_buffer.insert_text('\n')
+
+        @bindings.add(Keys.BracketedPaste)
+        def paste(event):
+            event.current_buffer.insert_text(self.paste_blocks.paste(event.data))
+
+        @bindings.add(Keys.Any)
+        def type_text(event):
+            event.current_buffer.insert_text(self.paste_blocks.literal(event.data * event.arg))
 
         @bindings.add('c-c')
         def interrupt(event):
@@ -156,7 +217,8 @@ class Terminal:
             else:
                 event.current_buffer.delete()
 
-        self.prompt = PromptSession(multiline=True, key_bindings=bindings, input=input, output=output,
+        self.prompt = PromptSession(multiline=True, wrap_lines=True, key_bindings=bindings, input=input, output=output,
+                                    input_processors=[self.paste_blocks],
                                     color_depth={'truecolor': ColorDepth.DEPTH_24_BIT,
                                                  'standard': ColorDepth.DEPTH_4_BIT,
                                                  'windows': ColorDepth.DEPTH_4_BIT}.get(
@@ -167,12 +229,13 @@ class Terminal:
                                     refresh_interval=0.2,
                                     style=PromptStyle.from_dict({'prompt': '#d1d5db bold',
                                                            'input-field': 'bg:#202329 #e5e7eb',
+                                                           'paste-block': '#93c5fd bold',
                                                            'bottom-toolbar': '#8b949e',
                                                            'completion-menu.completion': 'bg:#1f2937 #f8fafc',
                                                            'completion-menu.completion.current': 'bg:#374151 #ffffff'}))
         input_window = self.prompt.layout.current_window
         input_window.style = lambda: '' if self.prompt.app.is_done else 'class:input-field'
-        input_window.height = Dimension.exact(1)
+        input_window.height = Dimension(min=1, max=8)
         def reset_exit(_):
             self.exit_armed = False
         self.prompt.default_buffer.on_text_changed += reset_exit
@@ -183,7 +246,9 @@ class Terminal:
         self.exit_armed = False
         heading = safe_text(message.strip() or 'skua')
         prefix = '❯ ' if message == 'skua> ' else heading + '\n❯ '
-        return await self.prompt.prompt_async(prefix, prompt_continuation='  ')
+        with shifted_enter():
+            text = await self.prompt.prompt_async(prefix, prompt_continuation='  ')
+        return self.paste_blocks.expand(text)
 
     def _toolbar(self):
         if self.exit_armed:
@@ -196,7 +261,7 @@ class Terminal:
         if self.working:
             return '  Thinking… · Ctrl-C cancel'
         context = '' if self.context_label == 'context not estimated' else self.context_label + ' · '
-        return '  ' + context + 'Enter send · Alt+Enter newline · Tab paths · /help'
+        return '  ' + context + 'Enter send · Shift+Enter newline · Tab paths · /help'
 
     def show_activity(self, activity):
         status = getattr(self, 'status', None)
@@ -208,12 +273,69 @@ class Terminal:
         if activity is None:
             return
         if activity.status is not None:
-            detail = f' · {activity.summary}' if activity.summary else ''
-            self.write(f'{activity.operation} #{activity.call_seq}: {activity.status}'
-                       f' · {activity.elapsed:.1f}s{detail}')
+            self.write_tool_result(activity)
         elif activity.phase != 'approval' and hasattr(self, 'console'):
             self.status = self.console.status(ActivityDisplay(activity), spinner='dots')
             self.status.start()
+
+    def write_tool_result(self, activity):
+        subject = tool_subject(activity)
+        success = activity.status == 'ok'
+        verbs = {'run_command': 'Ran', 'read_file': 'Read', 'list_files': 'Listed',
+                 'search_files': 'Searched', 'apply_patch': 'Updated'}
+        if success:
+            title = f'{verbs.get(activity.operation, "Completed")} {subject}'
+        else:
+            label = {'error': 'Failed', 'timeout': 'Timed out', 'cancelled': 'Cancelled',
+                     'denied': 'Denied', 'not_run': 'Not run'}.get(activity.status, activity.status)
+            title = f'{label} · {compact_text(activity.operation, 40)}: {subject}'
+        style = 'bold red' if activity.status in {'error', 'timeout'} else 'yellow' if not success else 'bold'
+        compact = activity.operation in READ_TOOLS
+        if compact:
+            title += f' · #{activity.call_seq}'
+        self.write(f'• {title}', style=style)
+        data = activity.data or {}
+        lines = []
+        if activity.operation == 'run_command' and activity.output is not None:
+            width = max(20, min(120, getattr(getattr(self, 'console', None), 'width', 100) - 6))
+            lines = output_preview(activity.output, width=width)
+            if data.get('changes'):
+                lines.append(f'{len(data["changes"])} project paths changed' + (' (partial listing)' if data.get('changes_incomplete') else ''))
+            if data.get('commit') and data['commit'].get('commit'):
+                lines.append('Commit: ' + data['commit']['commit'])
+        elif not success:
+            lines = [compact_text(activity.result_text or activity.summary or 'No result available.', 220)]
+            if activity.output is not None:
+                lines.extend(output_preview(activity.output))
+        elif activity.operation == 'read_file':
+            total = data.get('total_lines')
+            start = data.get('start_line', 1)
+            if not total:
+                lines = ['File is empty.']
+            elif start > total:
+                lines = [f'No lines returned; start {start} exceeds {total} total lines.']
+            else:
+                lines = [f'{total} total lines; read from line {start}']
+        elif activity.operation == 'apply_patch':
+            lines = [compact_text(activity.result_text or activity.summary, 220)]
+        else:
+            lines = [activity.summary] if activity.summary else []
+            if data.get('truncated'):
+                lines.append('Search stopped at the output limit; narrow the query or directory.')
+        for index, line in enumerate(lines):
+            self.write(('  └ ' if index == 0 else '    ') + line)
+        metadata = [] if compact else [f'#{activity.call_seq}']
+        if not compact and activity.elapsed >= 1:
+            metadata.append(f'{activity.elapsed:.1f}s')
+        if 'returncode' in data:
+            metadata.append(f'exit {data["returncode"]}')
+        if activity.output and activity.output.get('capture_truncated'):
+            metadata.append('capture truncated')
+        if metadata:
+            self.write('    ' + ' · '.join(metadata), style='dim')
+        if (activity.result_text or activity.output is not None) and not getattr(self, '_output_hint_shown', False):
+            self.write('    Use /output <number> to inspect retained tool output.', style='dim')
+            self._output_hint_shown = True
 
     def set_working(self, active):
         self.working = active
@@ -482,9 +604,10 @@ async def conversation(config: Config, client: ChatClient, terminal: Terminal, *
                         runtime.workflows.init_offered = False
                     continue
                 if command == '/help':
-                    terminal.write('Enter: send · Alt+Enter: newline · Ctrl-C: cancel/clear\n'
+                    terminal.write('Enter: send · Shift+Enter: newline (Ctrl+J fallback) · Ctrl-C: cancel/clear\n'
                                    '/save [path] [--name "name"] · /export [path.md] · /sessions\n'
-                                   '/resume <id-or-path> · /output <call-seq> · /new · /exit\n'
+                                   '/resume <id-or-path> · /new · /exit\n'
+                                   '/output <number> — inspect retained output for a tool call (for example /output 3)\n'
                                    '/undo [revert|local] (default: reversing commit; requires managed Git)\n'
                                    '/compact · /context · /recover · /abandon\n'
                                    '/permissions [grant patch <directory>|grant command "exact command"|revoke <id|all>]\n'
@@ -530,14 +653,18 @@ async def conversation(config: Config, client: ChatClient, terminal: Terminal, *
                         terminal.write('Pending lint grouping cleared; files remain unchanged and uncommitted.')
                     elif args[0] == '/output' and len(args) == 2:
                         found = next((e for e in session.events if e['type'] == 'tool_result'
-                                      and str(e['call_seq']) == args[1] and e['output']), None)
+                                      and str(e['call_seq']) == args[1]), None)
                         if found is None:
-                            terminal.write('No retained command output for that call.')
+                            terminal.write('No retained result for that call.')
+                        elif found['output'] is None:
+                            terminal.write(found['model_text'] or 'No text returned.')
                         else:
+                            if not found['output']['observed_bytes']:
+                                terminal.write('No stdout or stderr output.')
                             for chunk in found['output']['chunks']:
                                 if 'omitted_bytes' in chunk:
                                     terminal.write(f"[{chunk['omitted_bytes']} bytes discarded]")
-                                else:
+                                elif chunk['text']:
                                     terminal.write(f"{chunk['stream']}:\n{chunk['text']}")
                     elif args[0] == '/sessions' and len(args) == 1:
                         terminal.write('\n'.join(store.list_sessions()) or 'No saved sessions.')
@@ -575,6 +702,7 @@ async def conversation(config: Config, client: ChatClient, terminal: Terminal, *
                     else:
                         terminal.write('Unknown or unavailable command. Use /help.')
                     continue
+                terminal._output_hint_shown = False
                 task = asyncio.create_task(run_turn(session, client, text,
                                            runtime=runtime,
                                            on_waiting=terminal.set_working,
@@ -608,7 +736,7 @@ async def start(config: Config, *, terminal=None, client_factory=ChatClient, res
     session = None
     try:
         if play_startup:
-            await maybe_play(config.startup_animation)
+            await maybe_play(config.startup_animation, terminal.console)
         if resume is not None:
             session = Store(config.root, config.sessions_directory).load(resume)
             profile = config.profile()
@@ -627,10 +755,6 @@ async def start(config: Config, *, terminal=None, client_factory=ChatClient, res
                 terminal.write(str(exc))
         credential = resolve_credential(config)
         async with client_factory(config.profile(), credential) as client:
-            terminal.write('Checking model tool support (uses a small API request)…')
-            probe = asyncio.create_task(check_capabilities(client, on_retry=lambda n, d: terminal.write(f'Diagnostic retry {n}/3 in {d:g}s.')))
-            with cancel_on_sigint(probe):
-                await probe
             await conversation(config, client, terminal, initial=session)
     finally:
         if session is not None:
@@ -640,7 +764,7 @@ async def start(config: Config, *, terminal=None, client_factory=ChatClient, res
 def run_chat(config: Config, *, resume=None) -> int:
     config.profile()
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise ConfigError('interactive chat requires a terminal; use skua squak for endpoint diagnostics')
+        raise ConfigError('interactive chat requires a terminal; use skua run for bounded tasks or skua squak for endpoint diagnostics')
     try:
         asyncio.run(start(config, resume=resume))
     except asyncio.CancelledError:

@@ -50,6 +50,20 @@ def tool_schema(name):
     return {'type': 'function', 'function': {'name': name, 'parameters': {'type': 'object'}}}
 
 
+def test_streamed_refusal_keeps_diagnostic_and_text():
+    data = sse(event({'refusal': 'Cannot '}), event({'refusal': 'help.'}), event(finish='stop'))
+    async def scenario():
+        stream = Stream([data])
+        async with ChatClient(PROFILE, None, transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, headers={'content-type': 'text/event-stream'}, stream=stream))) as client:
+            chunks = []
+            reply = await client.complete([{'role': 'user', 'content': 'task'}], on_text=chunks.append)
+        assert reply.refused and not reply.calls
+        assert reply.text == ''.join(chunks) == 'Cannot help.'
+        assert stream.closed
+    asyncio.run(scenario())
+
+
 def test_fragmented_utf8_sse_and_request():
     requests = []
     data = sse(event({'role': 'assistant'}), event({'content': 'héllo'}), event(finish='stop'))

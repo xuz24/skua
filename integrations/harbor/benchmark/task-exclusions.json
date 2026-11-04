@@ -1,0 +1,261 @@
+{
+  "version": 1,
+  "reviewed_on": "2026-10-28",
+  "dataset_revision": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+  "scope": "Reported Terminal-Bench 2.0 task defects; conservative exclusions, not independent reproduction of every report. Excludes instruction/verifier mismatches, dependency/resource failures and integrity defects. Does not exclude ordinary model failures, budget limits, reference-solution-only bugs or reports specific to 2.1.",
+  "tasks": {
+    "adaptive-rejection-sampler": {
+      "reason": "Unspecified function signature.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "break-filter-js-from-html": {
+      "reason": "Missing verifier script prevents reward generation.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/issues/26"
+      ]
+    },
+    "build-cython-ext": {
+      "reason": "Unpinned planarity release breaks repository tests.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/issues/75"
+      ]
+    },
+    "build-pmars": {
+      "reason": "Ambiguous build destination.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "build-pov-ray": {
+      "reason": "Obsolete package pins.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "caffe-cifar-10": {
+      "reason": "Overrestricted build checks; insufficient resources.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "cobol-modernization": {
+      "reason": "Audit reports solution leakage.",
+      "evidence": "external_audit_report",
+      "sources": [
+        "https://fidian.ai/blog/did-your-agent-really-improve/#appendix-a"
+      ]
+    },
+    "compile-compcert": {
+      "reason": "Host CPU count exceeds resource allocation.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "configure-git-webserver": {
+      "reason": "Promised authentication setup is missing.",
+      "evidence": "locally_reproduced_and_upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/39",
+        "https://github.com/harbor-framework/terminal-bench-2-1/issues/133"
+      ]
+    },
+    "extract-elf": {
+      "reason": "Audit reports incorrect or overly restrictive verification.",
+      "evidence": "external_audit_report",
+      "sources": [
+        "https://fidian.ai/blog/did-your-agent-really-improve/#appendix-a"
+      ]
+    },
+    "extract-moves-from-video": {
+      "reason": "Unreliable external video dependency.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "filter-js-from-html": {
+      "reason": "Unspecified HTML normalization.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "financial-document-processor": {
+      "reason": "Obsolete package pins.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "fix-code-vulnerability": {
+      "reason": "Audit reports solution leakage.",
+      "evidence": "external_audit_report",
+      "sources": [
+        "https://fidian.ai/blog/did-your-agent-really-improve/#appendix-a"
+      ]
+    },
+    "fix-git": {
+      "reason": "Setup leaks the solution.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "git-leak-recovery": {
+      "reason": "Audit reports a verifier loophole.",
+      "evidence": "external_audit_report",
+      "sources": [
+        "https://fidian.ai/blog/did-your-agent-really-improve/#appendix-a"
+      ]
+    },
+    "gpt2-codegolf": {
+      "reason": "Missing restrictions allow code-length bypass.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/issues/62"
+      ]
+    },
+    "hf-model-inference": {
+      "reason": "Valid storage formats rejected.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "install-windows-3.11": {
+      "reason": "Unstated socket and display requirements.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "make-doom-for-mips": {
+      "reason": "Stale package installation; insufficient resources.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "mcmc-sampling-stan": {
+      "reason": "Obsolete package pins.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "model-extraction-relu-logits": {
+      "reason": "Model parameters are exposed in task files.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/issues/60"
+      ]
+    },
+    "mteb-leaderboard": {
+      "reason": "Missing dependency; unstated coverage requirement.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "mteb-retrieve": {
+      "reason": "Incompatible unpinned dependency.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "overfull-hbox": {
+      "reason": "Obsolete package pins.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "path-tracing": {
+      "reason": "Reference executable is accessible to the agent.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/issues/61"
+      ]
+    },
+    "polyglot-c-py": {
+      "reason": "Compiler byproducts rejected.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "polyglot-rust-c": {
+      "reason": "Compiler byproducts rejected.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "protein-assembly": {
+      "reason": "External sequence API changed.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "query-optimize": {
+      "reason": "Unstated database identity constraint.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "raman-fitting": {
+      "reason": "Tests impose unstated data and fitting conventions.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/issues/85"
+      ]
+    },
+    "sam-cell-seg": {
+      "reason": "Argument convention contradicts instructions.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "sanitize-git-repo": {
+      "reason": "Verifier fails when rewritten history removes a referenced commit.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/issues/84"
+      ]
+    },
+    "torch-pipeline-parallelism": {
+      "reason": "Insufficient memory.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "torch-tensor-parallelism": {
+      "reason": "Unstated input partitioning; insufficient memory.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    },
+    "train-fasttext": {
+      "reason": "Fragile verifier dependency installation.",
+      "evidence": "upstream_report",
+      "sources": [
+        "https://github.com/harbor-framework/terminal-bench-2/pull/53"
+      ]
+    }
+  }
+}

@@ -95,11 +95,12 @@ class Workflows:
             if decision == 'approved':
                 await mutation(invoke, self.root, 'init')
                 repo = await asyncio.to_thread(Repo.find, self.root)
-        target_repos = await asyncio.to_thread(lambda: [Repo.find(p) for p in paths])
-        if any(r != repo for r in target_repos):
-            raise GitError('Split patches by repository. External or nested-repository targets need their own workflow.')
-        if repo and self.runtime.config.managed_git:
-            await asyncio.to_thread(repo.validate_targets, paths)
+        if self.runtime.config.managed_git:
+            target_repos = await asyncio.to_thread(lambda: [Repo.find(p) for p in paths])
+            if any(r != repo for r in target_repos):
+                raise GitError('Split patches by repository. External or nested-repository targets need their own workflow.')
+            if repo:
+                await asyncio.to_thread(repo.validate_targets, paths)
         return repo
 
     async def checkpoint(self, session, call_seq, repo, patch, paths):

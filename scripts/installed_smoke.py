@@ -175,7 +175,40 @@ async def workflow(root, *, shell='/bin/bash', streaming=True):
     final.close()
     assert 'never-send-this-value' not in save_path.read_text()
     assert cli(['--root', str(root), 'sessions']) == 0
+    # Only the explicitly requested full_checks call probes capability; neither
+    # starting nor resuming chat may add another synthetic endpoint request.
+    assert sum([t['function']['name'] for t in p.get('tools', [])] == ['skua_diagnostic']
+               for p in requests) == 1
     return len(requests)
+
+
+async def headless_workflow(root, *, shell='/bin/bash', streaming=True):
+    """Installed-package unattended policy and shared-tool acceptance."""
+    from skua.config import build_config
+    from skua.headless import execute
+    config = build_config(root, [('acceptance', {'schema_version': 1,
+        'profiles': {'default': {'base_url': 'https://mock.invalid/v1', 'model': 'mock',
+                                'auth': {'enabled': False}, 'stream': streaming}},
+        'shell': {'executable': shell}})])
+    for policy in ('review', 'disposable'):
+        calls = 0
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return wire_reply(calls=[('run_command', {'command': 'printf headless > result.txt'})], streaming=streaming)
+            return wire_reply('Done.', streaming=streaming)
+        factory = lambda p, k: ChatClient(p, k, transport=httpx.MockTransport(handler))
+        result, session, _ = await execute(config, 'Write the fixture', policy=policy,
+                                          max_seconds=10, max_tool_calls=2, client_factory=factory)
+        assert result['status'] == ('completed' if policy == 'disposable' else 'approval_required')
+        assert result['task_success_verified'] is False
+        assert calls == (2 if policy == 'disposable' else 1)
+        assert not list((root / '.skua').glob('sessions/*'))
+        if policy == 'review':
+            assert not (root / 'result.txt').exists()
+    assert (root / 'result.txt').read_text() == 'headless'
+    assert not (root / '.git').exists()
 
 
 def blocked(*args, **kwargs):
@@ -197,7 +230,10 @@ def main():
         with patch.dict(os.environ, {'HOME': str(home), 'SHELL': args.shell}), \
                 patch.object(socket.socket, 'connect', blocked), patch.object(socket, 'create_connection', blocked):
             count = asyncio.run(workflow(root.resolve(), shell=args.shell, streaming=not args.nonstreaming))
-    print(f'Installed workflow passed ({count} mocked endpoint requests; network blocked).')
+            headless_root = Path(directory) / 'headless'
+            headless_root.mkdir()
+            asyncio.run(headless_workflow(headless_root.resolve(), shell=args.shell, streaming=not args.nonstreaming))
+    print(f'Installed workflow passed ({count} mocked interactive endpoint requests; headless policies passed; network blocked).')
 
 
 if __name__ == '__main__':
